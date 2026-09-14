@@ -141,9 +141,20 @@ func (c Config) Xray(certPath, keyPath string) ([]byte, error) {
 		return nil, errors.New("TLS certificate and key paths are required")
 	}
 	profile := map[string]any{
-		"log":       map[string]any{"loglevel": "warning"},
-		"inbounds":  []any{map[string]any{"tag": "xconnect-vless-in", "listen": "0.0.0.0", "port": c.Transport.Port, "protocol": "vless", "settings": map[string]any{"clients": []any{map[string]any{"id": c.Transport.AuthID}}, "decryption": "none"}, "streamSettings": map[string]any{"network": "xhttp", "security": "tls", "tlsSettings": map[string]any{"rejectUnknownSni": true, "minVersion": "1.2", "certificates": []any{map[string]any{"certificateFile": certPath, "keyFile": keyPath}}}, "xhttpSettings": map[string]any{"path": c.Transport.XHTTPPath(), "mode": c.Transport.XHTTPMode(), "host": c.Transport.XHTTPHost()}}}},
-		"outbounds": []any{map[string]any{"tag": "direct", "protocol": "freedom"}, map[string]any{"tag": "block", "protocol": "blackhole"}},
+		"log": map[string]any{"loglevel": "warning"},
+		"routing": map[string]any{
+			"domainStrategy": "AsIs",
+			"rules": []any{map[string]any{
+				"type":        "field",
+				"inboundTag":  []string{"xconnect-vless-in"},
+				"outboundTag": "xconnect-wireguard",
+			}},
+		},
+		"inbounds": []any{map[string]any{"tag": "xconnect-vless-in", "listen": "0.0.0.0", "port": c.Transport.Port, "protocol": "vless", "settings": map[string]any{"clients": []any{map[string]any{"id": c.Transport.AuthID}}, "decryption": "none"}, "streamSettings": map[string]any{"network": "xhttp", "security": "tls", "tlsSettings": map[string]any{"rejectUnknownSni": true, "minVersion": "1.2", "certificates": []any{map[string]any{"certificateFile": certPath, "keyFile": keyPath}}}, "xhttpSettings": map[string]any{"path": c.Transport.XHTTPPath(), "mode": c.Transport.XHTTPMode(), "host": c.Transport.XHTTPHost()}}}},
+		"outbounds": []any{
+			map[string]any{"tag": "xconnect-wireguard", "protocol": "freedom", "settings": map[string]any{"redirect": "127.0.0.1:51820"}},
+			map[string]any{"tag": "block", "protocol": "blackhole"},
+		},
 	}
 	return json.MarshalIndent(profile, "", "  ")
 }

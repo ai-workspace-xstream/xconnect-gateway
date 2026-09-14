@@ -45,3 +45,57 @@ func TestClientAcceptsFormalZeroExchangeAndAckResponses(t *testing.T) {
 		t.Fatalf("formal ack response rejected: %v", err)
 	}
 }
+
+func TestClientSessionUsesFormalDeviceAuthorizationAndRoundTripsNonce(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	const credential = "xdc_gateway-credential"
+	const nonce = "gateway-session-nonce"
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/overlay/v1/device/session" {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.Header.Get("Authorization"); got != "Device "+credential {
+			http.Error(w, "formal Device authorization required", http.StatusUnauthorized)
+			return
+		}
+		if got := r.Header.Get("XConnect-Device"); got != "" {
+			http.Error(w, "legacy device header must not be sent", http.StatusBadRequest)
+			return
+		}
+		var request struct {
+			ClientNonce string `json:"client_nonce"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.ClientNonce != nonce {
+			http.Error(w, "client nonce mismatch", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Cache-Control", "private, no-store")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(SessionResponse{
+			ClientNonce:     request.ClientNonce,
+			EnrollmentToken: "xenr_gateway",
+			TokenType:       "Bearer",
+			IssuedAt:        now,
+			ExpiresAt:       now.Add(10 * time.Minute),
+			Scope:           []string{"overlay:config:read", "overlay:config:ack"},
+			DeviceID:        "gateway-1",
+			NetworkID:       "network-1",
+			SigningKeys:     []SigningKey{},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.http = server.Client()
+	response, err := client.Session(context.Background(), credential, nonce)
+	if err != nil {
+		t.Fatalf("formal session contract rejected: response=%#v err=%v", response, err)
+	}
+	if response.ClientNonce != nonce || response.DeviceID != "gateway-1" || response.NetworkID != "network-1" || response.EnrollmentToken == "" {
+		t.Fatalf("invalid session response bindings: %#v", response)
+	}
+}

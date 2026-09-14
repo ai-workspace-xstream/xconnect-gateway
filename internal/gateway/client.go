@@ -144,7 +144,7 @@ func (c *Client) Exchange(ctx context.Context, token, gatewayID, hostname, publi
 
 func (c *Client) Session(ctx context.Context, credential, nonce string) (SessionResponse, error) {
 	var out SessionResponse
-	head, err := c.request(ctx, http.MethodPost, "/api/overlay/v1/device/session", "XConnect-Device "+credential, map[string]string{"client_nonce": nonce}, &out)
+	head, err := c.request(ctx, http.MethodPost, "/api/overlay/v1/device/session", "Device "+credential, map[string]string{"client_nonce": nonce}, &out)
 	if err != nil {
 		return out, err
 	}
