@@ -47,4 +47,9 @@ sudo xconnect-gateway up
 sudo systemctl enable --now xconnect-gateway-sync.timer
 ```
 
+`up` is non-disruptive after the first activation: when `xconzero0` already
+exists, peer changes are applied with `wg syncconf` instead of tearing down and
+recreating the interface. This preserves live WireGuard sockets and handshake
+timestamps during periodic reconciliation.
+
 The invitation is one-time sensitive data. Do not pass it as a GitHub Actions input or print it in logs.
