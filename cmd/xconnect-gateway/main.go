@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -185,11 +186,36 @@ func applyRuntime(ctx context.Context, dir string, cfg gateway.Config) error {
 	if err := command(ctx, "xray", "run", "-test", "-config", xrayPath); err != nil {
 		return err
 	}
-	_ = exec.CommandContext(ctx, "wg-quick", "down", wgPath).Run()
-	if err := command(ctx, "wg-quick", "up", wgPath); err != nil {
+	if wireGuardApplyMode(interfaceExists(ctx, cfg.InterfaceName)) == "syncconf" {
+		// Keep the interface and its sockets alive while applying peer changes.
+		// Tearing it down here resets WireGuard handshake timestamps and causes
+		// a periodic sync to look like a connectivity failure.
+		stripped, err := exec.CommandContext(ctx, "wg-quick", "strip", wgPath).Output()
+		if err != nil {
+			return fmt.Errorf("wg-quick strip failed: %w", err)
+		}
+		sync := exec.CommandContext(ctx, "wg", "syncconf", cfg.InterfaceName, "/dev/stdin")
+		sync.Stdin = bytes.NewReader(stripped)
+		sync.Stdout = os.Stdout
+		sync.Stderr = os.Stderr
+		if err := sync.Run(); err != nil {
+			return fmt.Errorf("wg syncconf failed: %w", err)
+		}
+	} else if err := command(ctx, "wg-quick", "up", wgPath); err != nil {
 		return err
 	}
 	return command(ctx, "systemctl", "restart", "xconnect-gateway-xray.service")
+}
+
+func wireGuardApplyMode(interfacePresent bool) string {
+	if interfacePresent {
+		return "syncconf"
+	}
+	return "up"
+}
+
+func interfaceExists(ctx context.Context, name string) bool {
+	return exec.CommandContext(ctx, "ip", "link", "show", "dev", name).Run() == nil
 }
 func down(args []string) error {
 	f, dir := common("down", args)
