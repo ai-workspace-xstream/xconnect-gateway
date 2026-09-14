@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
@@ -201,10 +202,58 @@ func applyRuntime(ctx context.Context, dir string, cfg gateway.Config) error {
 		if err := sync.Run(); err != nil {
 			return fmt.Errorf("wg syncconf failed: %w", err)
 		}
+		// wg syncconf intentionally does not manage the routes that wg-quick
+		// created when the interface was first brought up. Reconcile the
+		// peer routes explicitly or a newly enrolled peer can handshake while
+		// packets still follow the host's default route.
+		if err := reconcileWireGuardRoutes(ctx, cfg.InterfaceName); err != nil {
+			return err
+		}
 	} else if err := command(ctx, "wg-quick", "up", wgPath); err != nil {
 		return err
 	}
 	return command(ctx, "systemctl", "restart", "xconnect-gateway-xray.service")
+}
+
+func reconcileWireGuardRoutes(ctx context.Context, interfaceName string) error {
+	raw, err := exec.CommandContext(ctx, "wg", "show", interfaceName, "allowed-ips").Output()
+	if err != nil {
+		return fmt.Errorf("wg allowed-ips inspection failed: %w", err)
+	}
+	for _, route := range wireGuardRouteCIDRs(string(raw)) {
+		family := "-4"
+		if strings.Contains(route, ":") {
+			family = "-6"
+		}
+		if err := command(ctx, "ip", family, "route", "replace", route, "dev", interfaceName); err != nil {
+			return fmt.Errorf("reconcile WireGuard route %s failed: %w", route, err)
+		}
+	}
+	return nil
+}
+
+func wireGuardRouteCIDRs(raw string) []string {
+	seen := make(map[string]struct{})
+	var routes []string
+	for _, line := range strings.Split(raw, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		for _, candidate := range fields[1:] {
+			_, network, err := net.ParseCIDR(candidate)
+			if err != nil || network == nil || network.String() == "0.0.0.0/0" || network.String() == "::/0" {
+				continue
+			}
+			route := network.String()
+			if _, ok := seen[route]; ok {
+				continue
+			}
+			seen[route] = struct{}{}
+			routes = append(routes, route)
+		}
+	}
+	return routes
 }
 
 func wireGuardApplyMode(interfacePresent bool) string {
