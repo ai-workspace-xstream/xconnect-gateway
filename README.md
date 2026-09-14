@@ -1,6 +1,8 @@
 # XConnect Gateway
 
-Independent Linux relay/service for XConnect Zero. It is deliberately separate from the XConnect One controlled-client CLI and from XConnect App.
+Independent Linux Server relay/service for XConnect Zero. Linux Server is the
+only supported Gateway platform in the current release. It is deliberately
+separate from the XConnect One controlled-client product and from XConnect App.
 
 The runtime performs `join → session renewal → signed gateway config sync → WireGuard/Xray apply → ACK`. XConnect Zero `accounts` is the only configuration authority. The binary rejects unsigned, expired, cross-network, or cross-gateway configuration.
 
@@ -24,6 +26,17 @@ Gateway 二进制；外部 Xray/WireGuard、TLS 文件和 Zero 邀请仍由节�
 按受保护流程配置。
 
 Install `wireguard-tools`, `xray`, the systemd units under `packaging/systemd`, and the released binary at `/usr/local/bin/xconnect-gateway`. Provision the TLS certificate and key at `/etc/xconnect-gateway/tls.crt` and `/etc/xconnect-gateway/tls.key` from Vault without writing either value to Git.
+
+The reviewed one-line installer only installs the CLI. It does not enroll the node,
+consume an invitation, or start a network service:
+
+```sh
+curl -fsSL https://install.svc.plus/xconnect-gateway | \
+  sudo env XCONNECT_GATEWAY_VERSION=v0.1.6 bash
+```
+
+Initialize the protected local identity explicitly, then use a short-lived Zero
+invitation to join:
 
 ```sh
 sudo xconnect-gateway diagnose
