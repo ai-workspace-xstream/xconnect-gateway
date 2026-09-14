@@ -30,9 +30,13 @@ type Peer struct {
 }
 
 type Transport struct {
+	Kind       string `json:"kind"`
 	ServerName string `json:"server_name"`
 	Port       int    `json:"port"`
 	AuthID     string `json:"auth_id"`
+	Path       string `json:"path,omitempty"`
+	Mode       string `json:"mode,omitempty"`
+	Host       string `json:"host,omitempty"`
 }
 
 type Signature struct {
@@ -79,8 +83,17 @@ func (c Config) signingBytes() ([]byte, error) {
 }
 
 func (c Config) Verify(keys []SigningKey, now time.Time) error {
-	if c.SchemaVersion != 1 || c.Role != Role || c.ConfigID == "" || c.NetworkID == "" || c.GatewayID == "" || c.Generation == 0 || c.InterfaceName == "" || len(c.InterfaceName) > 15 || c.ListenPort < 1 || c.ListenPort > 65535 || c.MTU < 576 || c.Transport.Port < 1 || c.Transport.Port > 65535 || c.Transport.ServerName == "" || c.Transport.AuthID == "" || c.Signature.Algorithm != "Ed25519" || !c.ExpiresAt.After(now) || c.IssuedAt.After(now.Add(30*time.Second)) {
+	if c.SchemaVersion != 1 || c.Role != Role || c.ConfigID == "" || c.NetworkID == "" || c.GatewayID == "" || c.Generation == 0 || c.InterfaceName == "" || len(c.InterfaceName) > 15 || c.ListenPort < 1 || c.ListenPort > 65535 || c.MTU < 576 || c.Transport.Kind != "vless-xhttp" || c.Transport.Port != 443 || c.Transport.ServerName == "" || c.Transport.AuthID == "" || c.Signature.Algorithm != "Ed25519" || !c.ExpiresAt.After(now) || c.IssuedAt.After(now.Add(30*time.Second)) {
 		return errors.New("invalid gateway signed config")
+	}
+	if c.Transport.Path != "" && (!strings.HasPrefix(c.Transport.Path, "/") || len(c.Transport.Path) > 1024) {
+		return errors.New("invalid gateway XHTTP path")
+	}
+	if c.Transport.Mode != "" && c.Transport.Mode != "auto" && c.Transport.Mode != "packet-up" && c.Transport.Mode != "stream-up" {
+		return errors.New("invalid gateway XHTTP mode")
+	}
+	if c.Transport.Host != "" && strings.TrimSpace(c.Transport.Host) == "" {
+		return errors.New("invalid gateway XHTTP host")
 	}
 	if prefix, err := netip.ParsePrefix(c.Address); err != nil || !prefix.Addr().Is4() || prefix.Bits() != 32 {
 		return errors.New("invalid gateway address")
@@ -137,11 +150,32 @@ func (c Config) Xray(certPath, keyPath string) ([]byte, error) {
 				"outboundTag": "xconnect-wireguard",
 			}},
 		},
-		"inbounds": []any{map[string]any{"tag": "xconnect-vless-in", "listen": "0.0.0.0", "port": c.Transport.Port, "protocol": "vless", "settings": map[string]any{"clients": []any{map[string]any{"id": c.Transport.AuthID}}, "decryption": "none"}, "streamSettings": map[string]any{"network": "tcp", "security": "tls", "tlsSettings": map[string]any{"rejectUnknownSni": true, "minVersion": "1.2", "certificates": []any{map[string]any{"certificateFile": certPath, "keyFile": keyPath}}}}}},
+		"inbounds": []any{map[string]any{"tag": "xconnect-vless-in", "listen": "0.0.0.0", "port": c.Transport.Port, "protocol": "vless", "settings": map[string]any{"clients": []any{map[string]any{"id": c.Transport.AuthID}}, "decryption": "none"}, "streamSettings": map[string]any{"network": "xhttp", "security": "tls", "tlsSettings": map[string]any{"rejectUnknownSni": true, "minVersion": "1.2", "certificates": []any{map[string]any{"certificateFile": certPath, "keyFile": keyPath}}}, "xhttpSettings": map[string]any{"path": c.Transport.XHTTPPath(), "mode": c.Transport.XHTTPMode(), "host": c.Transport.XHTTPHost()}}}},
 		"outbounds": []any{
 			map[string]any{"tag": "xconnect-wireguard", "protocol": "freedom", "settings": map[string]any{"redirect": "127.0.0.1:51820"}},
 			map[string]any{"tag": "block", "protocol": "blackhole"},
 		},
 	}
 	return json.MarshalIndent(profile, "", "  ")
+}
+
+func (t Transport) XHTTPPath() string {
+	if strings.TrimSpace(t.Path) == "" {
+		return "/xconnect"
+	}
+	return t.Path
+}
+
+func (t Transport) XHTTPMode() string {
+	if strings.TrimSpace(t.Mode) == "" {
+		return "auto"
+	}
+	return t.Mode
+}
+
+func (t Transport) XHTTPHost() string {
+	if strings.TrimSpace(t.Host) == "" {
+		return t.ServerName
+	}
+	return t.Host
 }
