@@ -46,6 +46,10 @@ type Network struct {
 	TransportServerName string    `json:"transport_server_name"`
 	TransportPort       int       `json:"transport_port"`
 	TransportAuthID     string    `json:"transport_auth_id"`
+	TransportKind       string    `json:"transport_kind"`
+	TransportPath       string    `json:"transport_path"`
+	TransportMode       string    `json:"transport_mode"`
+	TransportHost       string    `json:"transport_host"`
 	CreatedAt           time.Time `json:"created_at"`
 	UpdatedAt           time.Time `json:"updated_at"`
 }

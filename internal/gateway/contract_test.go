@@ -15,7 +15,7 @@ func TestSignedGatewayConfigAndRendering(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Truncate(time.Second)
-	cfg := Config{SchemaVersion: 1, Role: Role, ConfigID: "cfg-1", NetworkID: "net-1", GatewayID: "gw-1", Generation: 2, IssuedAt: now, ExpiresAt: now.Add(10 * time.Minute), InterfaceName: "xconzero0", Address: "10.77.0.1/32", ListenPort: 51820, MTU: 1280, Peers: []Peer{{DeviceID: "one-1", WireGuardPublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)), WireGuardAddress: "10.77.0.2/32", AllowedIPs: "10.77.0.2/32"}}, Transport: Transport{ServerName: "gw.example.test", Port: 443, AuthID: "11111111-1111-1111-1111-111111111111"}, Signature: Signature{Algorithm: "Ed25519", KeyID: "key-1"}}
+	cfg := Config{SchemaVersion: 1, Role: Role, ConfigID: "cfg-1", NetworkID: "net-1", GatewayID: "gw-1", Generation: 2, IssuedAt: now, ExpiresAt: now.Add(10 * time.Minute), InterfaceName: "xconzero0", Address: "10.77.0.1/32", ListenPort: 51820, MTU: 1280, Peers: []Peer{{DeviceID: "one-1", WireGuardPublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)), WireGuardAddress: "10.77.0.2/32", AllowedIPs: "10.77.0.2/32"}}, Transport: Transport{Kind: "vless-xhttp", ServerName: "gw.example.test", Port: 443, AuthID: "11111111-1111-1111-1111-111111111111", Path: "/xconnect", Mode: "auto", Host: "gw.example.test"}, Signature: Signature{Algorithm: "Ed25519", KeyID: "key-1"}}
 	payload, err := cfg.signingBytes()
 	if err != nil {
 		t.Fatal(err)
@@ -30,7 +30,7 @@ func TestSignedGatewayConfigAndRendering(t *testing.T) {
 		t.Fatalf("bad WireGuard config: %s", wg)
 	}
 	xray, err := cfg.Xray("/tls.crt", "/tls.key")
-	if err != nil || strings.Contains(string(xray), "xtls-rprx-vision") || !strings.Contains(string(xray), `"id": "11111111-1111-1111-1111-111111111111"`) {
+	if err != nil || strings.Contains(string(xray), "xtls-rprx-vision") || !strings.Contains(string(xray), `"id": "11111111-1111-1111-1111-111111111111"`) || !strings.Contains(string(xray), `"network": "xhttp"`) || !strings.Contains(string(xray), `"path": "/xconnect"`) {
 		t.Fatalf("bad Xray config: %s err=%v", xray, err)
 	}
 	cfg.Generation++
