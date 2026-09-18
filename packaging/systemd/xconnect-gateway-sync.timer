@@ -2,9 +2,9 @@
 Description=Periodic XConnect Gateway configuration reconciliation
 
 [Timer]
-OnBootSec=2min
-OnUnitActiveSec=5min
-RandomizedDelaySec=30s
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=5s
 Persistent=true
 
 [Install]

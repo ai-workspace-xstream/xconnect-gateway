@@ -64,9 +64,16 @@ sudo /usr/local/bin/xconnect-gateway status --state-dir /var/lib/xconnect-gatewa
 ```
 
 `up` 会获取并验证签名 Gateway 配置，生成受保护的 Xray/WireGuard 文件，
-启动外部运行时并发送应用 ACK。定时同步可使用仓库提供的 systemd
+启动外部运行时并发送应用 ACK。定时同步使用仓库提供的 systemd
 `xconnect-gateway-sync.service/.timer`；Xray 服务使用
-`xconnect-gateway-xray.service`。安装这些 unit 后再执行：
+`xconnect-gateway-xray.service`。
+
+`xconnect-gateway-sync.timer` 默认配置为每 60 秒运行一次 (`OnUnitActiveSec=60s, AccuracySec=5s`)。
+Accounts 判定 `recent_ack`（面板绿灯）的窗口是 5 分钟（`internal/overlay/service.go:37`）。
+为了防止定时器时间漂移导致状态在 `recent_ack` 与 `stale` 之间跳动，同步周期必须小于判定窗口的三分之一（≤ 100s）。
+当配置未发生变更时，`up` 会自动发送 ACK 刷新控制面 `last_seen_at` 心跳，且不会重启 Xray 或重载 WireGuard 接口。
+
+安装这些 unit 后再执行：
 
 ```sh
 sudo systemctl enable --now xconnect-gateway-xray.service

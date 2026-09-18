@@ -166,8 +166,10 @@ func syncConfig(ctx context.Context, args []string, apply bool) error {
 		if os.Geteuid() != 0 {
 			return errors.New("up must run as root")
 		}
-		if err := applyRuntime(ctx, *dir, cfg); err != nil {
-			return err
+		if state.AppliedConfigID != cfg.ConfigID || state.AppliedGeneration != cfg.Generation {
+			if err := applyRuntime(ctx, *dir, cfg); err != nil {
+				return err
+			}
 		}
 		if err := client.Ack(ctx, token, cfg); err != nil {
 			return err
