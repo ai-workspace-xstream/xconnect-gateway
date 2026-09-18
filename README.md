@@ -134,4 +134,10 @@ exists, peer changes are applied with `wg syncconf` instead of tearing down and
 recreating the interface. This preserves live WireGuard sockets and handshake
 timestamps during periodic reconciliation.
 
+`xconnect-gateway-sync.timer` is configured to run every 60 seconds (`OnUnitActiveSec=60s, AccuracySec=5s`).
+Accounts evaluates node connection status as `recent_ack` within a 5-minute window (`internal/overlay/service.go:37`).
+The sync interval + accuracy must remain well below 100s (one-third of the 5-minute window) so that Gateway heartbeats
+reliably refresh `last_seen_at` without flapping between `recent_ack` and `stale`. When the configuration is unchanged,
+`up` sends the ACK heartbeat without reloading WireGuard or restarting Xray.
+
 The invitation is one-time sensitive data. Do not pass it as a GitHub Actions input or print it in logs.
