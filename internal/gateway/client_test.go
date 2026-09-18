@@ -99,3 +99,70 @@ func TestClientSessionUsesFormalDeviceAuthorizationAndRoundTripsNonce(t *testing
 		t.Fatalf("invalid session response bindings: %#v", response)
 	}
 }
+
+func TestClientRepeatedAckSameGeneration(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	var ackCount int
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/overlay/v1/enrollment/signed-config/2/ack" {
+			ackCount++
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"acked":     true,
+				"duplicate": ackCount > 1,
+				"ack": map[string]any{
+					"device_id":   "gw-test",
+					"config_id":   "cfg-test",
+					"generation":  2,
+					"applied_at":  now,
+					"received_at": now,
+				},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.http = server.Client()
+
+	cfg := Config{ConfigID: "cfg-test", GatewayID: "gw-test", Generation: 2}
+
+	// 1st ACK
+	if err := client.Ack(context.Background(), "token", cfg); err != nil {
+		t.Fatalf("first ack failed: %v", err)
+	}
+
+	// 2nd ACK on same generation (heartbeat sync)
+	if err := client.Ack(context.Background(), "token", cfg); err != nil {
+		t.Fatalf("second ack on same generation failed: %v", err)
+	}
+
+	if ackCount != 2 {
+		t.Fatalf("expected server to receive 2 ACKs for same generation, got %d", ackCount)
+	}
+}
+
+func TestClientAckFailureReturnsError(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.http = server.Client()
+
+	cfg := Config{ConfigID: "cfg-test", GatewayID: "gw-test", Generation: 2}
+	err = client.Ack(context.Background(), "token", cfg)
+	if err == nil {
+		t.Fatal("expected error on server 500 for Ack, got nil")
+	}
+}
+
