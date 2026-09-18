@@ -25,8 +25,10 @@ accounts 判定 `recent_ack` 的窗口是 5 分钟（`internal/overlay/service.g
      ```bash
      gh workflow run daily-main-snapshot.yaml -R ai-workspace-infra/platform-ops-toolkit \
        -f deploy_env=uat \
-       -f xconnect_gateway_release_tag=v0.1.9
+       -f xconnect_gateway_release_tag=v0.1.9 \
+       -f enable_migration=false
      ```
+     这是全量快照：四个组织的 main 会一起部署到 UAT，Gateway 经由 `xconnect-zero-cloud.yaml`（Zero Lab）部署。**不要填 `repositories`**，填了会跳过 UAT 部署。`enable_migration` 在 UAT 上默认是 true，会拉取 PROD 数据，验证轮次要显式传 `false`。详见总规划 2.3.1。
    - 或者用 platform-ops-toolkit 的 `xconnect-one-uat.yaml`，传 `gateway_release_tag=v0.1.9`，先 dry-run 再 apply。apply 前需要用户确认，因为 tw-xconnect 同时承载 proxy 流量。
    - 如果这个 workflow 不会更新 timer unit，就在 playbooks 仓库配套提 PR；或者经用户批准，按总规划 A1 的 drop-in 手动加覆盖。
 5. **Goal**
