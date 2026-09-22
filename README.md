@@ -99,6 +99,14 @@ One WireGuard
 - `accounts`: per-user isolated networks, devices, invites, policy and signed configuration.
 - `portal`: user-facing `/panel/xconnect-zero` BFF/UI. It never receives device credentials or private keys.
 
+When the Gateway shares a Linux host with Agent Proxy, use the signed
+`transport.frontend: caddy-unix-h2c` profile. Gateway Xray then renders its
+own config and listens on `transport.listen_socket` (default
+`/run/xconnect-gateway/xray.sock`) without TLS. Caddy terminates TLS on
+TCP `443` and routes `/xconnect` to that socket; Agent Proxy keeps its
+independent `/usr/local/etc/xray/config.json`, `/dev/shm/xray.sock`, and
+`/split` route. The Gateway never imports Agent Proxy's dynamic VLESS UUIDs.
+
 ## Linux host
 
 自建节点的安装脚本、Zero 加入和 WireGuard-over-VLESS 验证见

@@ -68,3 +68,38 @@ func TestSignedGatewayConfigAndRendering(t *testing.T) {
 		t.Fatal("tampered config verified")
 	}
 }
+
+func TestCaddyUnixFrontendDoesNotRequireTLSOrPublicListener(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	cfg := Config{
+		SchemaVersion: 1, Role: Role, ConfigID: "cfg-caddy", NetworkID: "net-1", GatewayID: "gw-1",
+		Generation: 1, IssuedAt: now, ExpiresAt: now.Add(time.Minute), InterfaceName: "xconzero0",
+		Address: "10.77.0.1/32", ListenPort: 51820, MTU: 1420,
+		Transport: Transport{Kind: "vless-xhttp", ServerName: "ph-xconnect.svc.plus", Port: 443,
+			AuthID: "runtime-auth-id", Path: "/xconnect", Mode: "auto", Host: "ph-xconnect.svc.plus",
+			Frontend: FrontendCaddyUnixH2C, ListenSocket: DefaultGatewaySocket},
+	}
+	raw, err := cfg.Xray("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var profile struct {
+		Inbounds []struct {
+			Listen any `json:"listen"`
+			Port   int `json:"port"`
+			Stream struct {
+				Security string `json:"security"`
+				Network  string `json:"network"`
+				XHTTP    struct {
+					Path string `json:"path"`
+				} `json:"xhttpSettings"`
+			} `json:"streamSettings"`
+		} `json:"inbounds"`
+	}
+	if err := json.Unmarshal(raw, &profile); err != nil {
+		t.Fatal(err)
+	}
+	if len(profile.Inbounds) != 1 || profile.Inbounds[0].Listen != DefaultGatewaySocket+",0660" || profile.Inbounds[0].Port != 0 || profile.Inbounds[0].Stream.Security != "" || profile.Inbounds[0].Stream.Network != "xhttp" || profile.Inbounds[0].Stream.XHTTP.Path != "/xconnect" {
+		t.Fatalf("unexpected Caddy frontend Xray profile: %s", raw)
+	}
+}

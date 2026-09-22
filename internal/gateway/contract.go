@@ -13,6 +13,12 @@ import (
 
 const Role = "gateway"
 
+const (
+	FrontendDirectTLS    = "direct-tls"
+	FrontendCaddyUnixH2C = "caddy-unix-h2c"
+	DefaultGatewaySocket = "/run/xconnect-gateway/xray.sock"
+)
+
 type SigningKey struct {
 	KeyID     string     `json:"key_id"`
 	Algorithm string     `json:"algorithm"`
@@ -30,13 +36,15 @@ type Peer struct {
 }
 
 type Transport struct {
-	Kind       string `json:"kind"`
-	ServerName string `json:"server_name"`
-	Port       int    `json:"port"`
-	AuthID     string `json:"auth_id"`
-	Path       string `json:"path,omitempty"`
-	Mode       string `json:"mode,omitempty"`
-	Host       string `json:"host,omitempty"`
+	Kind         string `json:"kind"`
+	ServerName   string `json:"server_name"`
+	Port         int    `json:"port"`
+	AuthID       string `json:"auth_id"`
+	Path         string `json:"path,omitempty"`
+	Mode         string `json:"mode,omitempty"`
+	Host         string `json:"host,omitempty"`
+	Frontend     string `json:"frontend,omitempty"`
+	ListenSocket string `json:"listen_socket,omitempty"`
 }
 
 type Signature struct {
@@ -85,6 +93,19 @@ func (c Config) signingBytes() ([]byte, error) {
 func (c Config) Verify(keys []SigningKey, now time.Time) error {
 	if c.SchemaVersion != 1 || c.Role != Role || c.ConfigID == "" || c.NetworkID == "" || c.GatewayID == "" || c.Generation == 0 || c.InterfaceName == "" || len(c.InterfaceName) > 15 || c.ListenPort < 1 || c.ListenPort > 65535 || c.MTU < 576 || c.Transport.Kind != "vless-xhttp" || c.Transport.Port != 443 || c.Transport.ServerName == "" || c.Transport.AuthID == "" || c.Signature.Algorithm != "Ed25519" || !c.ExpiresAt.After(now) || c.IssuedAt.After(now.Add(30*time.Second)) {
 		return errors.New("invalid gateway signed config")
+	}
+	frontend := c.Transport.Frontend
+	if frontend == "" {
+		frontend = FrontendDirectTLS
+	}
+	if frontend != FrontendDirectTLS && frontend != FrontendCaddyUnixH2C {
+		return errors.New("invalid gateway XHTTP frontend")
+	}
+	if frontend == FrontendCaddyUnixH2C {
+		socket := strings.TrimSpace(c.Transport.ListenSocket)
+		if !strings.HasPrefix(socket, "/") || len(socket) > 4096 || strings.ContainsAny(socket, "\r\n") {
+			return errors.New("invalid gateway XHTTP listen socket")
+		}
 	}
 	if c.Transport.Path != "" && (!strings.HasPrefix(c.Transport.Path, "/") || len(c.Transport.Path) > 1024) {
 		return errors.New("invalid gateway XHTTP path")
@@ -137,8 +158,48 @@ func (c Config) WireGuard(privateKey string) string {
 }
 
 func (c Config) Xray(certPath, keyPath string) ([]byte, error) {
-	if strings.TrimSpace(certPath) == "" || strings.TrimSpace(keyPath) == "" {
+	frontend := c.Transport.Frontend
+	if frontend == "" {
+		frontend = FrontendDirectTLS
+	}
+	if frontend == FrontendDirectTLS && (strings.TrimSpace(certPath) == "" || strings.TrimSpace(keyPath) == "") {
 		return nil, errors.New("TLS certificate and key paths are required")
+	}
+	if frontend == FrontendCaddyUnixH2C && strings.TrimSpace(c.Transport.ListenSocket) == "" {
+		return nil, errors.New("Gateway Unix socket is required for Caddy frontend")
+	}
+
+	listen := any("0.0.0.0")
+	stream := map[string]any{
+		"network": "xhttp",
+		"xhttpSettings": map[string]any{
+			"path": c.Transport.XHTTPPath(),
+			"mode": c.Transport.XHTTPMode(),
+			"host": c.Transport.XHTTPHost(),
+		},
+	}
+	if frontend == FrontendCaddyUnixH2C {
+		listen = strings.TrimSpace(c.Transport.ListenSocket) + ",0660"
+	} else {
+		stream["security"] = "tls"
+		stream["tlsSettings"] = map[string]any{
+			"rejectUnknownSni": true,
+			"minVersion":       "1.2",
+			"certificates": []any{map[string]any{
+				"certificateFile": certPath,
+				"keyFile":         keyPath,
+			}},
+		}
+	}
+	inbound := map[string]any{
+		"tag":            "xconnect-vless-in",
+		"listen":         listen,
+		"protocol":       "vless",
+		"settings":       map[string]any{"clients": []any{map[string]any{"id": c.Transport.AuthID}}, "decryption": "none"},
+		"streamSettings": stream,
+	}
+	if frontend == FrontendDirectTLS {
+		inbound["port"] = c.Transport.Port
 	}
 	profile := map[string]any{
 		"log": map[string]any{"loglevel": "warning"},
@@ -150,7 +211,7 @@ func (c Config) Xray(certPath, keyPath string) ([]byte, error) {
 				"outboundTag": "xconnect-wireguard",
 			}},
 		},
-		"inbounds": []any{map[string]any{"tag": "xconnect-vless-in", "listen": "0.0.0.0", "port": c.Transport.Port, "protocol": "vless", "settings": map[string]any{"clients": []any{map[string]any{"id": c.Transport.AuthID}}, "decryption": "none"}, "streamSettings": map[string]any{"network": "xhttp", "security": "tls", "tlsSettings": map[string]any{"rejectUnknownSni": true, "minVersion": "1.2", "certificates": []any{map[string]any{"certificateFile": certPath, "keyFile": keyPath}}}, "xhttpSettings": map[string]any{"path": c.Transport.XHTTPPath(), "mode": c.Transport.XHTTPMode(), "host": c.Transport.XHTTPHost()}}}},
+		"inbounds": []any{inbound},
 		"outbounds": []any{
 			map[string]any{"tag": "xconnect-wireguard", "protocol": "freedom", "settings": map[string]any{"redirect": "127.0.0.1:51820"}},
 			map[string]any{"tag": "block", "protocol": "blackhole"},
