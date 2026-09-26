@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"os"
 	"strings"
 	"time"
 )
@@ -36,7 +37,7 @@ type Peer struct {
 }
 
 type Transport struct {
-	Kind         string `json:"kind"`
+	Kind         string `json:"kind,omitempty"`
 	ServerName   string `json:"server_name"`
 	Port         int    `json:"port"`
 	AuthID       string `json:"auth_id"`
@@ -91,10 +92,13 @@ func (c Config) signingBytes() ([]byte, error) {
 }
 
 func (c Config) Verify(keys []SigningKey, now time.Time) error {
-	if c.SchemaVersion != 1 || c.Role != Role || c.ConfigID == "" || c.NetworkID == "" || c.GatewayID == "" || c.Generation == 0 || c.InterfaceName == "" || len(c.InterfaceName) > 15 || c.ListenPort < 1 || c.ListenPort > 65535 || c.MTU < 576 || c.Transport.Kind != "vless-xhttp" || c.Transport.Port != 443 || c.Transport.ServerName == "" || c.Transport.AuthID == "" || c.Signature.Algorithm != "Ed25519" || !c.ExpiresAt.After(now) || c.IssuedAt.After(now.Add(30*time.Second)) {
+	if c.SchemaVersion != 1 || c.Role != Role || c.ConfigID == "" || c.NetworkID == "" || c.GatewayID == "" || c.Generation == 0 || c.InterfaceName == "" || len(c.InterfaceName) > 15 || c.ListenPort < 1 || c.ListenPort > 65535 || c.MTU < 576 || (c.Transport.Kind != "" && c.Transport.Kind != "vless-xhttp") || c.Transport.Port != 443 || c.Transport.ServerName == "" || c.Transport.AuthID == "" || c.Signature.Algorithm != "Ed25519" || !c.ExpiresAt.After(now) || c.IssuedAt.After(now.Add(30*time.Second)) {
 		return errors.New("invalid gateway signed config")
 	}
 	frontend := c.Transport.Frontend
+	if frontend == "" {
+		frontend = os.Getenv("XCONNECT_GATEWAY_FRONTEND")
+	}
 	if frontend == "" {
 		frontend = FrontendDirectTLS
 	}
@@ -103,6 +107,12 @@ func (c Config) Verify(keys []SigningKey, now time.Time) error {
 	}
 	if frontend == FrontendCaddyUnixH2C {
 		socket := strings.TrimSpace(c.Transport.ListenSocket)
+		if socket == "" {
+			socket = os.Getenv("XCONNECT_GATEWAY_LISTEN_SOCKET")
+		}
+		if socket == "" {
+			socket = DefaultGatewaySocket
+		}
 		if !strings.HasPrefix(socket, "/") || len(socket) > 4096 || strings.ContainsAny(socket, "\r\n") {
 			return errors.New("invalid gateway XHTTP listen socket")
 		}
@@ -160,12 +170,22 @@ func (c Config) WireGuard(privateKey string) string {
 func (c Config) Xray(certPath, keyPath string) ([]byte, error) {
 	frontend := c.Transport.Frontend
 	if frontend == "" {
+		frontend = os.Getenv("XCONNECT_GATEWAY_FRONTEND")
+	}
+	if frontend == "" {
 		frontend = FrontendDirectTLS
 	}
 	if frontend == FrontendDirectTLS && (strings.TrimSpace(certPath) == "" || strings.TrimSpace(keyPath) == "") {
 		return nil, errors.New("TLS certificate and key paths are required")
 	}
-	if frontend == FrontendCaddyUnixH2C && strings.TrimSpace(c.Transport.ListenSocket) == "" {
+	listenSocket := strings.TrimSpace(c.Transport.ListenSocket)
+	if listenSocket == "" {
+		listenSocket = os.Getenv("XCONNECT_GATEWAY_LISTEN_SOCKET")
+	}
+	if listenSocket == "" {
+		listenSocket = DefaultGatewaySocket
+	}
+	if frontend == FrontendCaddyUnixH2C && listenSocket == "" {
 		return nil, errors.New("Gateway Unix socket is required for Caddy frontend")
 	}
 
@@ -179,7 +199,7 @@ func (c Config) Xray(certPath, keyPath string) ([]byte, error) {
 		},
 	}
 	if frontend == FrontendCaddyUnixH2C {
-		listen = strings.TrimSpace(c.Transport.ListenSocket) + ",0660"
+		listen = listenSocket + ",0660"
 	} else {
 		stream["security"] = "tls"
 		stream["tlsSettings"] = map[string]any{

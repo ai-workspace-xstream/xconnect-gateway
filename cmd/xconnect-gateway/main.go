@@ -124,6 +124,8 @@ func syncConfig(ctx context.Context, args []string, apply bool) error {
 	f, dir := common("sync", args)
 	cert := f.String("tls-cert", "/etc/xconnect-gateway/tls.crt", "VLESS TLS certificate")
 	key := f.String("tls-key", "/etc/xconnect-gateway/tls.key", "VLESS TLS private key")
+	frontend := f.String("frontend", os.Getenv("XCONNECT_GATEWAY_FRONTEND"), "Gateway frontend mode: direct-tls or caddy-unix-h2c")
+	socket := f.String("listen-socket", os.Getenv("XCONNECT_GATEWAY_LISTEN_SOCKET"), "Gateway listen socket path for caddy-unix-h2c")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
@@ -158,6 +160,12 @@ func syncConfig(ctx context.Context, args []string, apply bool) error {
 	}
 	if err := cfg.Verify(state.SigningKeys, time.Now().UTC()); err != nil {
 		return err
+	}
+	if *frontend != "" && cfg.Transport.Frontend == "" {
+		cfg.Transport.Frontend = *frontend
+	}
+	if *socket != "" && cfg.Transport.ListenSocket == "" {
+		cfg.Transport.ListenSocket = *socket
 	}
 	if err := gateway.WriteRuntime(*dir, cfg, state.PrivateKey, *cert, *key); err != nil {
 		return err

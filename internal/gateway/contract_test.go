@@ -103,3 +103,44 @@ func TestCaddyUnixFrontendDoesNotRequireTLSOrPublicListener(t *testing.T) {
 		t.Fatalf("unexpected Caddy frontend Xray profile: %s", raw)
 	}
 }
+
+func TestLegacyAccountsSignedConfigWithoutKindAndFrontend(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	// Transport from older Accounts has no Kind, no Frontend, no ListenSocket
+	cfg := Config{
+		SchemaVersion: 1, Role: Role, ConfigID: "cfg-legacy", NetworkID: "net_shared_vault", GatewayID: "vault-prod-0",
+		Generation: 2, IssuedAt: now, ExpiresAt: now.Add(10 * time.Minute), InterfaceName: "xconzero0",
+		Address: "10.79.0.1/32", ListenPort: 51820, MTU: 1420, Peers: []Peer{},
+		Transport: Transport{ServerName: "vault-xconnect.svc.plus", Port: 443, AuthID: "fb830a6d-04b9-4ce4-a552-97464c99c2e8"},
+		Signature: Signature{Algorithm: "Ed25519", KeyID: "key-1"},
+	}
+	payload, err := cfg.signingBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Verify that payload JSON does NOT contain "kind":"" or "frontend":""
+	if strings.Contains(string(payload), `"kind"`) || strings.Contains(string(payload), `"frontend"`) {
+		t.Fatalf("payload should omit empty kind and frontend: %s", payload)
+	}
+	cfg.Signature.Value = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, payload))
+	keys := []SigningKey{{KeyID: "key-1", Algorithm: "Ed25519", PublicKey: base64.StdEncoding.EncodeToString(publicKey), Status: "current", NotBefore: now.Add(-time.Minute)}}
+	if err := cfg.Verify(keys, now); err != nil {
+		t.Fatalf("legacy signed config verification failed: %v", err)
+	}
+
+	// Environment variable fallback for frontend
+	t.Setenv("XCONNECT_GATEWAY_FRONTEND", FrontendCaddyUnixH2C)
+	t.Setenv("XCONNECT_GATEWAY_LISTEN_SOCKET", "/run/xconnect-gateway/xray.sock")
+	raw, err := cfg.Xray("", "")
+	if err != nil {
+		t.Fatalf("Xray render failed: %v", err)
+	}
+	if !strings.Contains(string(raw), "/run/xconnect-gateway/xray.sock,0660") {
+		t.Fatalf("expected Caddy unix socket in xray config: %s", raw)
+	}
+}
+
