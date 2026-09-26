@@ -13,6 +13,10 @@ func TestClientAcceptsFormalZeroExchangeAndAckResponses(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.Header.Get("User-Agent") != httpUserAgent {
+			http.Error(w, "stable user agent required", http.StatusForbidden)
+			return
+		}
 		switch r.URL.Path {
 		case "/api/overlay/v1/join-tokens/exchange":
 			w.Header().Set("Cache-Control", "no-store")
@@ -165,4 +169,3 @@ func TestClientAckFailureReturnsError(t *testing.T) {
 		t.Fatal("expected error on server 500 for Ack, got nil")
 	}
 }
-

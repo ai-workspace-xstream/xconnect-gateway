@@ -80,6 +80,8 @@ type Client struct {
 	http *http.Client
 }
 
+const httpUserAgent = "xconnect-gateway/0.1 (+https://github.com/ai-workspace-xstream/XConnect-Gateway)"
+
 func NewClient(controller string) (*Client, error) {
 	u, err := url.Parse(strings.TrimRight(strings.TrimSpace(controller), "/"))
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
@@ -104,6 +106,10 @@ func (c *Client) request(ctx context.Context, method, path, authorization string
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
+	// The controller is fronted by an edge policy that rejects the default
+	// Go client signature before the request reaches the JSON API. Keep the
+	// client identifiable without putting credentials in the header.
+	req.Header.Set("User-Agent", httpUserAgent)
 	if input != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
