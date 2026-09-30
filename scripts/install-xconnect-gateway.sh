@@ -61,3 +61,5 @@ else
 fi
 
 echo "installed XConnect Gateway $version ($asset) at $install_dir/xconnect-gateway"
+echo 'After enrollment, use scripts/setup-xconnect-gateway.sh from a matching checkout.'
+echo 'See docs/persistent-gateway-setup.md; setup requires the updated runtime-recovery binary.'

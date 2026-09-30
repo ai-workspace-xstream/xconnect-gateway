@@ -19,6 +19,7 @@ jobs:
           go-version-file: go.mod
       - run: go test ./...
       - run: go vet ./...
+      - run: bash -n scripts/setup-xconnect-gateway.sh scripts/install-xconnect-gateway.sh
       - run: go build ./cmd/xconnect-gateway
   release:
     if: startsWith(github.ref, 'refs/tags/v')

@@ -8,6 +8,8 @@ The runtime performs `join → session renewal → signed gateway config sync �
 
 ## Quick start: Linux Gateway
 
+For persistent forwarding, boot startup and non-disruptive runtime recovery after enrollment, see [persistent Gateway setup](docs/persistent-gateway-setup.md). Use a matching updated binary; the setup script alone cannot fix an older release.
+
 Gateway is a Linux Server role. The public entry point is a DNS-only hostname
 with TCP `443`; WireGuard `51820/UDP` is not a public security-group rule.
 
