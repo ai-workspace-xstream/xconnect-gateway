@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"flag"
@@ -167,6 +168,12 @@ func syncConfig(ctx context.Context, args []string, apply bool) error {
 	if *socket != "" && cfg.Transport.ListenSocket == "" {
 		cfg.Transport.ListenSocket = *socket
 	}
+	xrayPath := filepath.Join(*dir, "runtime", "xray.json")
+	appliedXrayPath := filepath.Join(*dir, "runtime", "xray-applied.sha256")
+	appliedXray, readErr := os.ReadFile(appliedXrayPath)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return readErr
+	}
 	if err := gateway.WriteRuntime(*dir, cfg, state.PrivateKey, *cert, *key); err != nil {
 		return err
 	}
@@ -174,8 +181,25 @@ func syncConfig(ctx context.Context, args []string, apply bool) error {
 		if os.Geteuid() != 0 {
 			return errors.New("up must run as root")
 		}
-		if state.AppliedConfigID != cfg.ConfigID || state.AppliedGeneration != cfg.Generation {
+		if state.AppliedConfigID != cfg.ConfigID || state.AppliedGeneration != cfg.Generation || !interfaceExists(ctx, cfg.InterfaceName) {
 			if err := applyRuntime(ctx, *dir, cfg); err != nil {
+				return err
+			}
+		}
+		currentXray, err := os.ReadFile(xrayPath)
+		if err != nil {
+			return err
+		}
+		active := exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", "xconnect-gateway-xray.service").Run() == nil
+		digest := fmt.Sprintf("%x", sha256.Sum256(currentXray))
+		if xrayRestartRequired(string(appliedXray), digest, active) {
+			if err := command(ctx, "xray", "run", "-test", "-config", xrayPath); err != nil {
+				return err
+			}
+			if err := command(ctx, "systemctl", "restart", "xconnect-gateway-xray.service"); err != nil {
+				return err
+			}
+			if err := os.WriteFile(appliedXrayPath, []byte(digest), 0o600); err != nil {
 				return err
 			}
 		}
@@ -190,6 +214,9 @@ func syncConfig(ctx context.Context, args []string, apply bool) error {
 	}
 	fmt.Printf("Gateway config %s generation %d %s\n", cfg.ConfigID, cfg.Generation, map[bool]string{true: "applied", false: "synced"}[apply])
 	return nil
+}
+func xrayRestartRequired(applied, current string, active bool) bool {
+	return !active || applied != current
 }
 func applyRuntime(ctx context.Context, dir string, cfg gateway.Config) error {
 	xrayPath := filepath.Join(dir, "runtime", "xray.json")
@@ -222,7 +249,7 @@ func applyRuntime(ctx context.Context, dir string, cfg gateway.Config) error {
 	} else if err := command(ctx, "wg-quick", "up", wgPath); err != nil {
 		return err
 	}
-	return command(ctx, "systemctl", "restart", "xconnect-gateway-xray.service")
+	return nil
 }
 
 func reconcileWireGuardRoutes(ctx context.Context, interfaceName string) error {
