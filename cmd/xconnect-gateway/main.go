@@ -31,6 +31,8 @@ func run(ctx context.Context, args []string) error {
 		return errors.New("usage: xconnect-gateway <init|join|sync|up|down|status|diagnose>")
 	}
 	switch args[0] {
+	case "relay":
+		return serveRelay(ctx, args[1:])
 	case "init":
 		return initState(ctx, args[1:])
 	case "join":
@@ -162,6 +164,9 @@ func syncConfig(ctx context.Context, args []string, apply bool) error {
 	if err := cfg.Verify(state.SigningKeys, time.Now().UTC()); err != nil {
 		return err
 	}
+	if err := gateway.SaveSignedConfig(*dir, cfg); err != nil {
+		return err
+	}
 	if *frontend != "" && cfg.Transport.Frontend == "" {
 		cfg.Transport.Frontend = *frontend
 	}
@@ -183,6 +188,11 @@ func syncConfig(ctx context.Context, args []string, apply bool) error {
 		}
 		if state.AppliedConfigID != cfg.ConfigID || state.AppliedGeneration != cfg.Generation || !interfaceExists(ctx, cfg.InterfaceName) {
 			if err := applyRuntime(ctx, *dir, cfg); err != nil {
+				return err
+			}
+		}
+		if cfg.Mesh != nil {
+			if err := command(ctx, "systemctl", "start", "xconnect-gateway-relay.service"); err != nil {
 				return err
 			}
 		}
@@ -249,6 +259,13 @@ func applyRuntime(ctx context.Context, dir string, cfg gateway.Config) error {
 	} else if err := command(ctx, "wg-quick", "up", wgPath); err != nil {
 		return err
 	}
+	if cfg.Mesh != nil {
+		if err := command(ctx, "systemctl", "start", "xconnect-gateway-relay.service"); err != nil {
+			return err
+		}
+	} else {
+		_ = command(ctx, "systemctl", "stop", "xconnect-gateway-relay.service")
+	}
 	return nil
 }
 
@@ -312,6 +329,7 @@ func down(args []string) error {
 	if err != nil {
 		return err
 	}
+	_ = exec.Command("systemctl", "stop", "xconnect-gateway-relay.service").Run()
 	_ = exec.Command("systemctl", "stop", "xconnect-gateway-xray.service").Run()
 	matches, _ := filepath.Glob(filepath.Join(*dir, "runtime", "*.conf"))
 	if len(matches) != 1 {
