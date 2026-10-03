@@ -1,0 +1,18 @@
+[Unit]
+Description=XConnect Gateway end-to-end packet relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/xconnect-gateway relay --state-dir /var/lib/xconnect-gateway
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

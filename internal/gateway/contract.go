@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ai-workspace-xstream/XConnect-Gateway/internal/relay"
 	"net/netip"
 	"os"
 	"strings"
@@ -55,43 +56,71 @@ type Signature struct {
 }
 
 type Config struct {
-	SchemaVersion int       `json:"schema_version"`
-	Role          string    `json:"role"`
-	ConfigID      string    `json:"config_id"`
-	NetworkID     string    `json:"network_id"`
-	GatewayID     string    `json:"gateway_id"`
-	Generation    uint64    `json:"generation"`
-	IssuedAt      time.Time `json:"issued_at"`
-	ExpiresAt     time.Time `json:"expires_at"`
-	InterfaceName string    `json:"interface_name"`
-	Address       string    `json:"address"`
-	ListenPort    int       `json:"listen_port"`
-	MTU           int       `json:"mtu"`
-	Peers         []Peer    `json:"peers"`
-	Transport     Transport `json:"transport"`
-	Signature     Signature `json:"signature"`
+	SchemaVersion int         `json:"schema_version"`
+	Role          string      `json:"role"`
+	ConfigID      string      `json:"config_id"`
+	NetworkID     string      `json:"network_id"`
+	GatewayID     string      `json:"gateway_id"`
+	Generation    uint64      `json:"generation"`
+	IssuedAt      time.Time   `json:"issued_at"`
+	ExpiresAt     time.Time   `json:"expires_at"`
+	InterfaceName string      `json:"interface_name"`
+	Address       string      `json:"address"`
+	ListenPort    int         `json:"listen_port"`
+	MTU           int         `json:"mtu"`
+	Peers         []Peer      `json:"peers"`
+	Transport     Transport   `json:"transport"`
+	Mesh          *relay.Spec `json:"mesh,omitempty"`
+	Signature     Signature   `json:"signature"`
 }
 
 func (c Config) signingBytes() ([]byte, error) {
 	return json.Marshal(struct {
-		SchemaVersion int       `json:"schema_version"`
-		Role          string    `json:"role"`
-		ConfigID      string    `json:"config_id"`
-		NetworkID     string    `json:"network_id"`
-		GatewayID     string    `json:"gateway_id"`
-		Generation    uint64    `json:"generation"`
-		IssuedAt      time.Time `json:"issued_at"`
-		ExpiresAt     time.Time `json:"expires_at"`
-		InterfaceName string    `json:"interface_name"`
-		Address       string    `json:"address"`
-		ListenPort    int       `json:"listen_port"`
-		MTU           int       `json:"mtu"`
-		Peers         []Peer    `json:"peers"`
-		Transport     Transport `json:"transport"`
-	}{c.SchemaVersion, c.Role, c.ConfigID, c.NetworkID, c.GatewayID, c.Generation, c.IssuedAt, c.ExpiresAt, c.InterfaceName, c.Address, c.ListenPort, c.MTU, c.Peers, c.Transport})
+		SchemaVersion int         `json:"schema_version"`
+		Role          string      `json:"role"`
+		ConfigID      string      `json:"config_id"`
+		NetworkID     string      `json:"network_id"`
+		GatewayID     string      `json:"gateway_id"`
+		Generation    uint64      `json:"generation"`
+		IssuedAt      time.Time   `json:"issued_at"`
+		ExpiresAt     time.Time   `json:"expires_at"`
+		InterfaceName string      `json:"interface_name"`
+		Address       string      `json:"address"`
+		ListenPort    int         `json:"listen_port"`
+		MTU           int         `json:"mtu"`
+		Peers         []Peer      `json:"peers"`
+		Transport     Transport   `json:"transport"`
+		Mesh          *relay.Spec `json:"mesh,omitempty"`
+	}{c.SchemaVersion, c.Role, c.ConfigID, c.NetworkID, c.GatewayID, c.Generation, c.IssuedAt, c.ExpiresAt, c.InterfaceName, c.Address, c.ListenPort, c.MTU, c.Peers, c.Transport, c.Mesh})
 }
 
 func (c Config) Verify(keys []SigningKey, now time.Time) error {
+	if c.Mesh != nil {
+		known := map[string]string{}
+		for _, p := range c.Peers {
+			known[p.DeviceID] = p.WireGuardPublicKey
+		}
+		seen := map[string]bool{}
+		if len(c.Mesh.Peers) > 256 {
+			return errors.New("too many relay peers")
+		}
+		for _, p := range c.Mesh.Peers {
+			if known[p.DeviceID] != p.PublicKey || seen[p.DeviceID] {
+				return errors.New("invalid relay identity")
+			}
+			seen[p.DeviceID] = true
+		}
+		for _, p := range c.Mesh.Peers {
+			dest := map[string]bool{}
+			for _, id := range p.AllowedPeers {
+				if id == p.DeviceID || !seen[id] || dest[id] {
+					return errors.New("invalid relay authorization")
+				}
+				dest[id] = true
+			}
+		}
+	}
+
 	if c.SchemaVersion != 1 || c.Role != Role || c.ConfigID == "" || c.NetworkID == "" || c.GatewayID == "" || c.Generation == 0 || c.InterfaceName == "" || len(c.InterfaceName) > 15 || c.ListenPort < 1 || c.ListenPort > 65535 || c.MTU < 576 || (c.Transport.Kind != "" && c.Transport.Kind != "vless-xhttp") || c.Transport.Port != 443 || c.Transport.ServerName == "" || c.Transport.AuthID == "" || c.Signature.Algorithm != "Ed25519" || !c.ExpiresAt.After(now) || c.IssuedAt.After(now.Add(30*time.Second)) {
 		return errors.New("invalid gateway signed config")
 	}
@@ -236,6 +265,12 @@ func (c Config) Xray(certPath, keyPath string) ([]byte, error) {
 			map[string]any{"tag": "xconnect-wireguard", "protocol": "freedom", "settings": map[string]any{"redirect": "127.0.0.1:51820"}},
 			map[string]any{"tag": "block", "protocol": "blackhole"},
 		},
+	}
+	if c.Mesh != nil {
+		routing := profile["routing"].(map[string]any)
+		rules := routing["rules"].([]any)
+		routing["rules"] = append([]any{map[string]any{"type": "field", "inboundTag": []string{"xconnect-vless-in"}, "network": "tcp", "port": "51821", "outboundTag": "xconnect-peer-relay"}}, rules...)
+		profile["outbounds"] = append(profile["outbounds"].([]any), map[string]any{"tag": "xconnect-peer-relay", "protocol": "freedom", "settings": map[string]any{"redirect": "127.0.0.1:51821"}})
 	}
 	return json.MarshalIndent(profile, "", "  ")
 }

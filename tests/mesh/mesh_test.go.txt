@@ -1,0 +1,495 @@
+package mesh_test
+
+import (
+	"bufio"
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"github.com/ai-workspace-xstream/XConnect-One/overlay/model"
+	"io"
+	"math/big"
+	"net"
+	"net/http"
+	"net/netip"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/ai-workspace-xstream/XConnect-Gateway/internal/gateway"
+	"github.com/ai-workspace-xstream/XConnect-Gateway/internal/relay"
+	"github.com/ai-workspace-xstream/XConnect-One/overlay/pathmanager"
+	"github.com/ai-workspace-xstream/XConnect-One/overlay/policy"
+	"github.com/ai-workspace-xstream/XConnect-One/overlay/signedconfig"
+	"golang.zx2c4.com/wireguard/conn"
+	"golang.zx2c4.com/wireguard/device"
+	"golang.zx2c4.com/wireguard/tun/netstack"
+)
+
+type fixtures struct {
+	One     []signedconfig.Config `json:"one"`
+	Gateway gateway.Config        `json:"gateway"`
+	Keys    json.RawMessage       `json:"keys"`
+	Private map[string]string     `json:"private"`
+	Policy  json.RawMessage       `json:"policy"`
+}
+
+func port(t *testing.T, network string) string {
+	t.Helper()
+	if network == "tcp" {
+		l, e := net.Listen("tcp4", "127.0.0.1:0")
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer l.Close()
+		return l.Addr().String()
+	}
+	l, e := net.ListenPacket("udp4", "127.0.0.1:0")
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer l.Close()
+	return l.LocalAddr().String()
+}
+func eventually(t *testing.T, f func() bool, description string) {
+	t.Helper()
+	deadline := time.Now().Add(12 * time.Second)
+	for time.Now().Before(deadline) {
+		if f() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timeout: %s", description)
+}
+func state(m *pathmanager.Manager, id string) string {
+	for _, s := range m.Status() {
+		if s.DeviceID == id {
+			return s.Path
+		}
+	}
+	return "missing"
+}
+func TestThreeOneWireGuardHTTPAdaptsEachPeerAndPreservesTCP(t *testing.T) { runMesh(t, false) }
+func TestThreeOneXrayXHTTPRelayAndLANAdaptation(t *testing.T) {
+	if _, e := exec.LookPath("xray"); e != nil {
+		t.Skip("Xray runtime unavailable")
+	}
+	runMesh(t, true)
+}
+func runMesh(t *testing.T, useXray bool) {
+	raw, e := os.ReadFile("fixtures.json")
+	if e != nil {
+		t.Fatal(e)
+	}
+	var f fixtures
+	if e = json.Unmarshal(raw, &f); e != nil {
+		t.Fatal(e)
+	}
+	var sk []signedconfig.SigningKey
+	var gk []gateway.SigningKey
+	_ = json.Unmarshal(f.Keys, &sk)
+	_ = json.Unmarshal(f.Keys, &gk)
+	if e = f.Gateway.Verify(gk, time.Now()); e != nil {
+		t.Fatalf("Accounts/Gateway signature: %v", e)
+	}
+	for _, c := range f.One {
+		if e = signedconfig.Verify(c, signedconfig.SigningKeys{Keys: sk}, time.Now()); e != nil {
+			t.Fatalf("Accounts/One signature: %v", e)
+		}
+		reference, e := policy.ReferenceFromVerifiedSignedConfig(c.NetworkID, c.Generation, c.Policy.Digest, c.ExpiresAt.Time)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e = policy.Consume(f.Policy, reference, policy.Floor{}, time.Now()); e != nil {
+			t.Fatal("signed whole-device policy interop", e)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server, e := relay.New(relay.Config{NetworkID: f.Gateway.NetworkID, PrivateKey: f.Private[f.Gateway.GatewayID], ExpiresAt: f.Gateway.ExpiresAt, Peers: f.Gateway.Mesh.Peers})
+	if e != nil {
+		t.Fatal(e)
+	}
+	listener, e := net.Listen("tcp4", "127.0.0.1:0")
+	if e != nil {
+		t.Fatal(e)
+	}
+	relayDone := make(chan error, 1)
+	relayCtx, stopRelay := context.WithCancel(ctx)
+	go func() { relayDone <- server.Serve(relayCtx, listener) }()
+	defer func() {
+		stopRelay()
+		if e := <-relayDone; e != nil {
+			t.Error(e)
+		}
+	}()
+	configs := map[string]pathmanager.Config{}
+	managers := map[string]*pathmanager.Manager{}
+	nets := map[string]*netstack.Net{}
+	devices := map[string]*device.Device{}
+	ports := map[string]string{}
+	for _, c := range f.One {
+		ports[c.DeviceID] = port(t, "udp")
+	}
+	gatewayPort := ""
+	certificate := ""
+	if useXray {
+		gatewayPort, certificate = startGatewayXray(t, ctx, f.Gateway, listener.Addr().String())
+	}
+	var abBlocked atomic.Bool
+	var allBlocked atomic.Bool
+	allBlocked.Store(true) // Start in relay-only mode before any peer can promote LAN.
+	for _, c := range f.One {
+		wg := ports[c.DeviceID]
+		peers := append([]pathmanager.Peer(nil), c.Mesh.Peers...)
+		relayEndpoint := listener.Addr().String()
+		for i := range peers {
+			peers[i].LocalEndpoint = port(t, "udp")
+		}
+		if useXray {
+			var runtime model.Config
+			raw, e := os.ReadFile(c.DeviceID + ".runtime.json")
+			if e != nil {
+				t.Fatal(e)
+			}
+			if e = json.Unmarshal(raw, &runtime); e != nil {
+				t.Fatal(e)
+			}
+			wg = runtime.Mesh.WGEndpoint
+			peers = runtime.Mesh.Peers
+			relayEndpoint = runtime.Mesh.RelayEndpoint
+			startOneXray(t, ctx, c.DeviceID, gatewayPort, certificate, relayEndpoint)
+		}
+		// LAN hook uses loopback for an isolated test, never a host route or real TUN.
+		id := c.DeviceID
+		opts := pathmanager.Options{ProbeInterval: 100 * time.Millisecond, FailureAfter: 600 * time.Millisecond, PromoteAfter: 3, Candidates: func(p uint16) []string {
+			return []string{netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), p).String()}
+		}, OnLink: func(a netip.AddrPort) bool {
+			if allBlocked.Load() {
+				return false
+			}
+			if !a.Addr().IsLoopback() {
+				return false
+			}
+			if abBlocked.Load() {
+				for target, m := range managers {
+					if ((id == "one-a" && target == "one-b") || (id == "one-b" && target == "one-a")) && m.LANAddress().Port() == a.Port() {
+						return false
+					}
+				}
+			}
+			return true
+		}}
+		config := pathmanager.Config{NetworkID: c.NetworkID, DeviceID: id, GatewayPublicKey: c.WireGuard.Peers[0].PublicKey, RelayEndpoint: relayEndpoint, LANListen: "127.0.0.1:0", WGEndpoint: wg, Interface: "test", OverlayCIDR: "10.79.0.0/24", ExpiresAt: c.ExpiresAt.Time, Peers: peers}
+		configs[id] = config
+		m, e := pathmanager.New(config, f.Private[id], opts)
+		if e != nil {
+			t.Fatal(e)
+		}
+		managers[id] = m
+		ip := strings.Split(c.WireGuard.Addresses[0], "/")[0]
+		tun, network, e := netstack.CreateNetTUN([]netip.Addr{netip.MustParseAddr(ip)}, nil, 1280)
+		if e != nil {
+			t.Fatal(e)
+		}
+		logger := device.NewLogger(device.LogLevelError, "")
+		if os.Getenv("XCONNECT_MESH_DEBUG") == "1" {
+			logger.Verbosef = func(format string, args ...any) {
+				if !strings.Contains(format, "worker") && (strings.Contains(format, "handshake") || strings.Contains(format, "invalid") || strings.Contains(format, "rate")) {
+					t.Logf(id+": "+format, args...)
+				}
+			}
+		}
+		dev := device.NewDevice(tun, conn.NewDefaultBind(), logger)
+		devices[id] = dev
+		nets[id] = network
+		private, _ := base64.StdEncoding.DecodeString(f.Private[id])
+		_, listen, _ := net.SplitHostPort(wg)
+		configuration := fmt.Sprintf("private_key=%s\nlisten_port=%s\n", hex.EncodeToString(private), listen)
+		for _, p := range peers {
+			key, _ := base64.StdEncoding.DecodeString(p.PublicKey)
+			configuration += fmt.Sprintf("public_key=%s\nallowed_ip=%s\nendpoint=%s\npersistent_keepalive_interval=%d\n", hex.EncodeToString(key), p.Address, p.LocalEndpoint, pathmanager.WireGuardKeepalive(id, p.DeviceID))
+		}
+		if e = dev.IpcSet(configuration); e != nil {
+			t.Fatal(e)
+		}
+	}
+	// All maps are immutable before goroutines start.
+	for _, m := range managers {
+		if e = m.Start(ctx); e != nil {
+			t.Fatal(e)
+		}
+	}
+	time.Sleep(500 * time.Millisecond)
+	for _, d := range devices {
+		if e = d.Up(); e != nil {
+			t.Fatal(e)
+		}
+	}
+	defer func() {
+		for _, m := range managers {
+			m.Close()
+		}
+		for _, d := range devices {
+			d.Close()
+		}
+	}()
+	for _, id := range []string{"one-b", "one-c"} {
+		ip := "10.79.0.3"
+		if id == "one-c" {
+			ip = "10.79.0.4"
+		}
+		l, e := nets[id].ListenTCP(&net.TCPAddr{IP: net.ParseIP(ip), Port: 8080})
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer l.Close()
+		go http.Serve(l, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "mesh-ok") }))
+	}
+	client := http.Client{Timeout: 8 * time.Second, Transport: &http.Transport{DialContext: nets["one-a"].DialContext}}
+	check := func(ip string) {
+		t.Helper()
+		response, e := client.Get("http://" + ip + ":8080/")
+		if e != nil {
+			t.Fatal(e)
+		}
+		b, e := io.ReadAll(response.Body)
+		response.Body.Close()
+		if e != nil || string(b) != "mesh-ok" {
+			t.Fatalf("HTTP payload: %v", e)
+		}
+	}
+	defer func() {
+		for id, m := range managers {
+			t.Log(id, m.Status())
+		}
+	}()
+	allBlocked.Store(true)
+	eventually(t, func() bool {
+		for _, d := range devices {
+			raw, e := d.IpcGet()
+			if e != nil {
+				t.Fatal(e)
+			}
+			if strings.Count(raw, "last_handshake_time_sec=") != 2 || strings.Contains(raw, "last_handshake_time_sec=0\n") {
+				return false
+			}
+		}
+		return true
+	}, "all authorized WireGuard peers complete initial handshake over relay")
+	check("10.79.0.3")
+	check("10.79.0.4")
+	t.Log("real WireGuard HTTP over authenticated Gateway relay passed")
+	allBlocked.Store(false)
+	eventually(t, func() bool {
+		return state(managers["one-a"], "one-b") == "direct-lan" && state(managers["one-a"], "one-c") == "direct-lan"
+	}, "both peers direct")
+	check("10.79.0.3")
+	check("10.79.0.4")
+	// Keep an actual TCP connection alive across a single-pair fallback and recovery.
+	connection, e := nets["one-a"].DialContext(ctx, "tcp", "10.79.0.3:8080")
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer connection.Close()
+	reader := bufio.NewReader(connection)
+	exchange := func() {
+		t.Helper()
+		connection.SetDeadline(time.Now().Add(8 * time.Second))
+		if _, e = io.WriteString(connection, "GET / HTTP/1.1\r\nHost: mesh\r\n\r\n"); e != nil {
+			t.Fatal(e)
+		}
+		response, e := http.ReadResponse(reader, nil)
+		if e != nil {
+			t.Fatal(e)
+		}
+		body, e := io.ReadAll(response.Body)
+		response.Body.Close()
+		if e != nil || string(body) != "mesh-ok" {
+			t.Fatalf("persistent TCP: %v", e)
+		}
+	}
+	exchange()
+	abBlocked.Store(true)
+	eventually(t, func() bool {
+		return state(managers["one-a"], "one-b") == "relay" && state(managers["one-a"], "one-c") == "direct-lan"
+	}, "per-peer fallback isolates A/B")
+	exchange()
+	check("10.79.0.4")
+	abBlocked.Store(false)
+	eventually(t, func() bool { return state(managers["one-a"], "one-b") == "direct-lan" }, "LAN restoration")
+	exchange()
+	// Reverse initiation after idle must work; no client request is needed to open a return path.
+	time.Sleep(time.Second)
+	reverse := http.Client{Timeout: 8 * time.Second, Transport: &http.Transport{DialContext: nets["one-c"].DialContext}}
+	response, e := reverse.Get("http://10.79.0.3:8080/")
+	if e != nil {
+		t.Fatal(e)
+	}
+	response.Body.Close()
+	t.Log("LAN promotion, per-peer fallback/recovery, persistent TCP and reverse initiation passed")
+	// Close relay grants for B, and withdraw B's local signed authority via expiry.
+	rc := relay.Config{NetworkID: f.Gateway.NetworkID, PrivateKey: f.Private[f.Gateway.GatewayID], ExpiresAt: f.Gateway.ExpiresAt}
+	for _, p := range f.Gateway.Mesh.Peers {
+		if p.DeviceID == "one-b" {
+			continue
+		}
+		allowed := []string{}
+		for _, id := range p.AllowedPeers {
+			if id != "one-b" {
+				allowed = append(allowed, id)
+			}
+		}
+		p.AllowedPeers = allowed
+		rc.Peers = append(rc.Peers, p)
+	}
+	if e = server.Update(rc); e != nil {
+		t.Fatal(e)
+	}
+	managers["one-b"].RefreshExpiry(time.Now().Add(-time.Second))
+	time.Sleep(250 * time.Millisecond)
+	for _, id := range []string{"one-a", "one-c"} {
+		config := configs[id]
+		config.Peers = nil
+		for _, p := range configs[id].Peers {
+			if p.DeviceID != "one-b" {
+				config.Peers = append(config.Peers, p)
+			}
+		}
+		if e = managers[id].Reconfigure(config); e != nil {
+			t.Fatal(e)
+		}
+	}
+	eventually(t, func() bool {
+		return state(managers["one-a"], "one-b") == "missing" && state(managers["one-a"], "one-c") == "direct-lan"
+	}, "membership withdrawal retains healthy peer")
+	check("10.79.0.4")
+	stopRelay()
+	time.Sleep(250 * time.Millisecond)
+	check("10.79.0.4")
+	if state(managers["one-a"], "one-c") != "direct-lan" {
+		t.Fatal("Gateway loss removed healthy LAN path")
+	}
+	t.Log("established LAN carries HTTP after Gateway relay stops")
+}
+
+func startProcess(t *testing.T, ctx context.Context, profile map[string]any, endpoint string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "xray.json")
+	raw, e := json.Marshal(profile)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = os.WriteFile(path, raw, 0600); e != nil {
+		t.Fatal(e)
+	}
+	processCtx, cancel := context.WithCancel(ctx)
+	command := exec.CommandContext(processCtx, "xray", "run", "-config", path)
+	log, e := os.OpenFile(filepath.Join(dir, "xray.log"), os.O_CREATE|os.O_WRONLY, 0600)
+	if e != nil {
+		t.Fatal(e)
+	}
+	command.Stdout = log
+	command.Stderr = log
+	if e = command.Start(); e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(func() { cancel(); _ = command.Wait(); log.Close() })
+	defer func() {
+		if t.Failed() {
+			raw, _ := os.ReadFile(filepath.Join(dir, "xray.log"))
+			if len(raw) > 2048 {
+				raw = raw[len(raw)-2048:]
+			}
+			t.Log(string(raw))
+		}
+	}()
+	eventually(t, func() bool {
+		connection, e := net.DialTimeout("tcp", endpoint, 100*time.Millisecond)
+		if e != nil {
+			return false
+		}
+		connection.Close()
+		return true
+	}, "Xray listener ready")
+}
+func startGatewayXray(t *testing.T, ctx context.Context, c gateway.Config, relayEndpoint string) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	key, e := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if e != nil {
+		t.Fatal(e)
+	}
+	cert := &x509.Certificate{SerialNumber: big.NewInt(1), DNSNames: []string{"gateway.example.test"}, NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, IsCA: true, BasicConstraintsValid: true}
+	der, e := x509.CreateCertificate(rand.Reader, cert, cert, &key.PublicKey, key)
+	if e != nil {
+		t.Fatal(e)
+	}
+	certificate := filepath.Join(dir, "cert.pem")
+	private := filepath.Join(dir, "key.pem")
+	encoded, e := x509.MarshalECPrivateKey(key)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = os.WriteFile(certificate, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0600); e != nil {
+		t.Fatal(e)
+	}
+	if e = os.WriteFile(private, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: encoded}), 0600); e != nil {
+		t.Fatal(e)
+	}
+	raw, e := c.Xray(certificate, private)
+	if e != nil {
+		t.Fatal(e)
+	}
+	var profile map[string]any
+	if e = json.Unmarshal(raw, &profile); e != nil {
+		t.Fatal(e)
+	}
+	endpoint := port(t, "tcp")
+	_, p, _ := net.SplitHostPort(endpoint)
+	var number int
+	fmt.Sscan(p, &number)
+	in := profile["inbounds"].([]any)[0].(map[string]any)
+	in["listen"] = "127.0.0.1"
+	in["port"] = number
+	for _, out := range profile["outbounds"].([]any) {
+		o := out.(map[string]any)
+		if o["tag"] == "xconnect-peer-relay" {
+			o["settings"].(map[string]any)["redirect"] = relayEndpoint
+		}
+	}
+	startProcess(t, ctx, profile, endpoint)
+	return p, certificate
+}
+func startOneXray(t *testing.T, ctx context.Context, id, gatewayPort, certificate, endpoint string) {
+	t.Helper()
+	raw, e := os.ReadFile(id + ".xray.json")
+	if e != nil {
+		t.Fatal(e)
+	}
+	var profile map[string]any
+	if e = json.Unmarshal(raw, &profile); e != nil {
+		t.Fatal(e)
+	}
+	out := profile["outbounds"].([]any)[0].(map[string]any)
+	server := out["settings"].(map[string]any)["vnext"].([]any)[0].(map[string]any)
+	server["address"] = "127.0.0.1"
+	var number int
+	fmt.Sscan(gatewayPort, &number)
+	server["port"] = number
+	tls := out["streamSettings"].(map[string]any)["tlsSettings"].(map[string]any)
+	tls["certificates"] = []any{map[string]any{"certificateFile": certificate, "usage": "verify"}}
+	startProcess(t, ctx, profile, endpoint)
+}

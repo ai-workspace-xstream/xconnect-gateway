@@ -78,3 +78,19 @@ func WriteRuntime(dir string, cfg Config, privateKey, cert, key string) error {
 	}
 	return os.WriteFile(filepath.Join(runtimeDir, "xray.json"), xray, 0600)
 }
+
+func SaveSignedConfig(dir string, cfg Config) error {
+	runtimeDir := filepath.Join(dir, "runtime")
+	if e := os.MkdirAll(runtimeDir, 0700); e != nil {
+		return e
+	}
+	raw, e := json.Marshal(cfg)
+	if e != nil {
+		return e
+	}
+	tmp := filepath.Join(runtimeDir, ".signed-config.json.tmp")
+	if e = os.WriteFile(tmp, raw, 0600); e != nil {
+		return e
+	}
+	return os.Rename(tmp, filepath.Join(runtimeDir, "signed-config.json"))
+}
