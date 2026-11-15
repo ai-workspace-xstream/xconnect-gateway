@@ -28,9 +28,11 @@ func main() {
 }
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: xconnect-gateway <init|join|sync|up|down|status|diagnose>")
+		return errors.New("usage: xconnect-gateway <init|join|sync|up|serve|down|status|diagnose>")
 	}
 	switch args[0] {
+	case "serve":
+		return serveContainer(ctx, args[1:])
 	case "relay":
 		return serveRelay(ctx, args[1:])
 	case "init":
@@ -85,13 +87,22 @@ func common(name string, args []string) (*flag.FlagSet, *string) {
 func join(ctx context.Context, args []string) error {
 	f, dir := common("join", args)
 	gatewayID := f.String("gateway-id", "", "Gateway ID matching the Zero network")
+	inviteFile := f.String("invite-file", "", "protected file containing the Zero invitation URI")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
-	if f.NArg() != 1 || *gatewayID == "" {
-		return errors.New("join requires --gateway-id and one xconnect:// invite URI")
+	if *gatewayID == "" || (*inviteFile == "" && f.NArg() != 1) || (*inviteFile != "" && f.NArg() != 0) {
+		return errors.New("join requires --gateway-id and exactly one invitation source")
 	}
-	controller, token, err := parseInvite(f.Arg(0))
+	invite := f.Arg(0)
+	if *inviteFile != "" {
+		raw, err := os.ReadFile(*inviteFile)
+		if err != nil {
+			return err
+		}
+		invite = strings.TrimSpace(string(raw))
+	}
+	controller, token, err := parseInvite(invite)
 	if err != nil {
 		return err
 	}
@@ -191,22 +202,21 @@ func syncConfig(ctx context.Context, args []string, apply bool) error {
 				return err
 			}
 		}
-		if cfg.Mesh != nil {
-			if err := command(ctx, "systemctl", "start", "xconnect-gateway-relay.service"); err != nil {
-				return err
-			}
+		runtime := serviceRuntime(ctx)
+		if err := runtime.reconcileRelay(ctx, *dir, cfg.Mesh != nil); err != nil {
+			return err
 		}
 		currentXray, err := os.ReadFile(xrayPath)
 		if err != nil {
 			return err
 		}
-		active := exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", "xconnect-gateway-xray.service").Run() == nil
+		active := runtime.xrayActive(ctx)
 		digest := fmt.Sprintf("%x", sha256.Sum256(currentXray))
 		if xrayRestartRequired(string(appliedXray), digest, active) {
 			if err := command(ctx, "xray", "run", "-test", "-config", xrayPath); err != nil {
 				return err
 			}
-			if err := command(ctx, "systemctl", "restart", "xconnect-gateway-xray.service"); err != nil {
+			if err := runtime.restartXray(ctx, xrayPath); err != nil {
 				return err
 			}
 			if err := os.WriteFile(appliedXrayPath, []byte(digest), 0o600); err != nil {
@@ -258,13 +268,6 @@ func applyRuntime(ctx context.Context, dir string, cfg gateway.Config) error {
 		}
 	} else if err := command(ctx, "wg-quick", "up", wgPath); err != nil {
 		return err
-	}
-	if cfg.Mesh != nil {
-		if err := command(ctx, "systemctl", "start", "xconnect-gateway-relay.service"); err != nil {
-			return err
-		}
-	} else {
-		_ = command(ctx, "systemctl", "stop", "xconnect-gateway-relay.service")
 	}
 	return nil
 }
