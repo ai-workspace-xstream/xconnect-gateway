@@ -21,9 +21,10 @@ RUN set -eu; \
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates iproute2 iptables wireguard-tools && rm -rf /var/lib/apt/lists/*
+    bash ca-certificates iproute2 iptables wireguard-tools procps && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/xconnect-gateway /usr/local/bin/
 COPY --from=xray /out/xray /usr/local/bin/
-EXPOSE 443/tcp
+RUN mkdir -p /var/lib/xconnect-gateway /run/xconnect-gateway
+EXPOSE 18183 51820/udp 51821
 ENTRYPOINT ["/usr/local/bin/xconnect-gateway"]
-CMD ["serve"]
+CMD ["--help"]

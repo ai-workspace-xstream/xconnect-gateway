@@ -1,0 +1,17 @@
+apiVersion: v2
+name: xconnect-gateway
+description: Standalone Helm chart for XConnect-Gateway overlay relay and service
+type: application
+version: 0.1.13
+appVersion: "v0.1.13"
+maintainers:
+  - name: AI Workspace XStream Team
+    email: infra@svc.plus
+keywords:
+  - xconnect
+  - gateway
+  - wireguard
+  - xray
+  - vless
+  - overlay
+  - p2p

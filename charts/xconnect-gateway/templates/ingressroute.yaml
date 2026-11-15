@@ -1,0 +1,32 @@
+{{- if .Values.traefikIngressRoute.enabled -}}
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ .Values.traefikIngressRoute.name | default (include "xconnect-gateway.fullname" .) }}
+  labels:
+    {{- include "xconnect-gateway.labels" . | nindent 4 }}
+    {{- with .Values.traefikIngressRoute.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.traefikIngressRoute.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  entryPoints:
+    {{- toYaml .Values.traefikIngressRoute.entryPoints | nindent 4 }}
+  routes:
+    - kind: Rule
+      match: Host(`{{ .Values.traefikIngressRoute.host }}`){{ if .Values.traefikIngressRoute.pathPrefix }} && PathPrefix(`{{ .Values.traefikIngressRoute.pathPrefix }}`){{ end }}
+      services:
+        - name: {{ include "xconnect-gateway.fullname" . }}
+          port: {{ .Values.service.xhttpPort }}
+          scheme: {{ .Values.traefikIngressRoute.scheme | default "h2c" }}
+          passHostHeader: true
+          responseForwarding:
+            flushInterval: {{ .Values.traefikIngressRoute.flushInterval | default "-1ms" }}
+  {{- if .Values.traefikIngressRoute.tls }}
+  tls:
+    secretName: {{ .Values.traefikIngressRoute.tls.secretName }}
+  {{- end }}
+{{- end }}

@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "xconnect-gateway.fullname" . }}-scripts
+  labels:
+    {{- include "xconnect-gateway.labels" . | nindent 4 }}
+data:
+  entrypoint.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    echo "==> Starting XConnect Gateway [${GATEWAY_ID}]"
+    mkdir -p "${STATE_DIR}" /run/xconnect-gateway
+
+    # Check enrollment status
+    if [[ ! -f "${STATE_DIR}/state.json" ]]; then
+      if [[ -n "${JOIN_URI:-}" ]]; then
+        echo "==> Enrolling gateway via JOIN_URI..."
+        xconnect-gateway join --state-dir "${STATE_DIR}" --gateway-id "${GATEWAY_ID}" "${JOIN_URI}"
+      elif [[ -n "${CONTROLLER_URL:-}" ]]; then
+        echo "==> Initializing gateway local state..."
+        xconnect-gateway init --state-dir "${STATE_DIR}" --gateway-id "${GATEWAY_ID}" --controller "${CONTROLLER_URL}"
+      else
+        echo "ERROR: Neither JOIN_URI nor CONTROLLER_URL provided for initial enrollment" >&2
+        exit 1
+      fi
+    fi
+
+    echo "==> Bringing up XConnect Gateway..."
+    xconnect-gateway up --state-dir "${STATE_DIR}" --frontend "${FRONTEND:-direct-h2c}"
+
+    # Start Xray if config exists
+    XRAY_PID=""
+    if [[ -f "${STATE_DIR}/runtime/xray.json" ]]; then
+      echo "==> Launching Xray runtime..."
+      xray run -config "${STATE_DIR}/runtime/xray.json" &
+      XRAY_PID=$!
+    fi
+
+    # Start Gateway Relay service (TCP 51821 for One peer relay)
+    RELAY_PID=""
+    if xconnect-gateway relay --help >/dev/null 2>&1; then
+      echo "==> Launching One Peer Relay service..."
+      xconnect-gateway relay --state-dir "${STATE_DIR}" &
+      RELAY_PID=$!
+    fi
+
+    cleanup() {
+      echo "==> Received shutdown signal, terminating processes..."
+      [[ -n "${XRAY_PID}" ]] && kill -TERM "${XRAY_PID}" 2>/dev/null || true
+      [[ -n "${RELAY_PID}" ]] && kill -TERM "${RELAY_PID}" 2>/dev/null || true
+      xconnect-gateway down --state-dir "${STATE_DIR}" || true
+      exit 0
+    }
+    trap cleanup SIGTERM SIGINT
+
+    # Periodic sync loop
+    INTERVAL="${SYNC_INTERVAL:-60s}"
+    echo "==> Entering sync loop (interval: ${INTERVAL})..."
+    while true; do
+      sleep "${INTERVAL}" &
+      wait $!
+      echo "==> Synchronizing gateway config..."
+      xconnect-gateway sync --state-dir "${STATE_DIR}" || echo "WARN: Gateway sync returned non-zero"
+    done

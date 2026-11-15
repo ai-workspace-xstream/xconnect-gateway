@@ -1,0 +1,101 @@
+# Default values for xconnect-gateway.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/ai-workspace-xstream/xconnect-gateway
+  pullPolicy: IfNotPresent
+  tag: "v0.1.13"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+gateway:
+  id: "gw-sit-tw-xconnect"
+  controllerUrl: "https://accounts.svc.plus"
+  stateDir: "/var/lib/xconnect-gateway"
+  frontend: "direct-h2c" # direct-h2c, caddy-unix-h2c, or direct-tls
+  listenPort: 18183
+  wireguardPort: 51820
+  relayPort: 51821
+  syncInterval: "60s"
+  # Optional initial join invite URI (e.g. xconnect://join/...)
+  joinUri: ""
+  existingSecret: "" # k8s secret containing key `join_uri`
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  fsGroup: 0
+
+securityContext:
+  privileged: false
+  capabilities:
+    add:
+      - NET_ADMIN
+      - NET_BIND_SERVICE
+  runAsUser: 0
+  runAsGroup: 0
+
+service:
+  type: ClusterIP
+  xhttpPort: 18183
+  wireguardPort: 51820
+  relayPort: 51821
+  annotations: {}
+
+# Native Traefik IngressRoute matching SIT cluster ingress architecture
+traefikIngressRoute:
+  enabled: true
+  name: "xconnect-gateway"
+  entryPoints:
+    - websecure
+  host: "xconnect-gateway.svc.plus"
+  pathPrefix: "" # empty for full host or "/xconnect"
+  scheme: "h2c"
+  flushInterval: "-1ms"
+  tls:
+    secretName: "shared-observability-tls"
+  annotations:
+    external-dns.alpha.kubernetes.io/target: "5.189.172.69"
+    external-dns.alpha.kubernetes.io/ttl: "300"
+    platform.svc.plus/external-dns-scope: "contabo-sit"
+  labels:
+    external-dns: "contabo-sit"
+
+# Standard k8s Ingress (disabled by default when Traefik IngressRoute is used)
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: xconnect-gateway.svc.plus
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+persistence:
+  enabled: true
+  storageClass: "local-path"
+  accessMode: ReadWriteOnce
+  size: 1Gi
+  annotations: {}
+  existingClaim: ""
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
