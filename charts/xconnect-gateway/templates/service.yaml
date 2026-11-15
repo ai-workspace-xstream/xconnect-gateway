@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "xconnect-gateway.fullname" . }}
+  labels:
+    {{- include "xconnect-gateway.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.xhttpPort }}
+      targetPort: xhttp
+      protocol: TCP
+      name: xhttp
+    - port: {{ .Values.service.wireguardPort }}
+      targetPort: wireguard
+      protocol: UDP
+      name: wireguard
+    - port: {{ .Values.service.relayPort }}
+      targetPort: relay
+      protocol: TCP
+      name: relay
+  selector:
+    {{- include "xconnect-gateway.selectorLabels" . | nindent 4 }}

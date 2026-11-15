@@ -1,0 +1,113 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "xconnect-gateway.fullname" . }}
+  labels:
+    {{- include "xconnect-gateway.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "xconnect-gateway.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "xconnect-gateway.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "xconnect-gateway.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/bash", "/scripts/entrypoint.sh"]
+          env:
+            - name: GATEWAY_ID
+              value: {{ .Values.gateway.id | quote }}
+            - name: CONTROLLER_URL
+              value: {{ .Values.gateway.controllerUrl | quote }}
+            - name: STATE_DIR
+              value: {{ .Values.gateway.stateDir | quote }}
+            - name: FRONTEND
+              value: {{ .Values.gateway.frontend | quote }}
+            - name: LISTEN_PORT
+              value: {{ .Values.gateway.listenPort | quote }}
+            - name: WIREGUARD_PORT
+              value: {{ .Values.gateway.wireguardPort | quote }}
+            - name: RELAY_PORT
+              value: {{ .Values.gateway.relayPort | quote }}
+            - name: SYNC_INTERVAL
+              value: {{ .Values.gateway.syncInterval | quote }}
+            {{- if .Values.gateway.joinUri }}
+            - name: JOIN_URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "xconnect-gateway.fullname" . }}-invite
+                  key: join_uri
+            {{- else if .Values.gateway.existingSecret }}
+            - name: JOIN_URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.existingSecret }}
+                  key: join_uri
+                  optional: true
+            {{- end }}
+          ports:
+            - name: xhttp
+              containerPort: {{ .Values.gateway.listenPort }}
+              protocol: TCP
+            - name: wireguard
+              containerPort: {{ .Values.gateway.wireguardPort }}
+              protocol: UDP
+            - name: relay
+              containerPort: {{ .Values.gateway.relayPort }}
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.gateway.stateDir }}
+            - name: scripts
+              mountPath: /scripts
+            - name: dev-net-tun
+              mountPath: /dev/net/tun
+      volumes:
+        - name: scripts
+          configMap:
+            name: {{ include "xconnect-gateway.fullname" . }}-scripts
+            defaultMode: 0755
+        - name: dev-net-tun
+          hostPath:
+            path: /dev/net/tun
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ if .Values.persistence.existingClaim }}{{ .Values.persistence.existingClaim }}{{ else }}{{ include "xconnect-gateway.fullname" . }}-data{{ end }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
