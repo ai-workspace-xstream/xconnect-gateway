@@ -151,3 +151,5 @@ reliably refresh `last_seen_at` without flapping between `recent_ack` and `stale
 `up` sends the ACK heartbeat without reloading WireGuard or restarting Xray.
 
 The invitation is one-time sensitive data. Do not pass it as a GitHub Actions input or print it in logs.
+
+For Docker Compose on Linux, see [container deployment](docs/container-deployment.md).
