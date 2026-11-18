@@ -19,7 +19,21 @@ const (
 	FrontendDirectTLS    = "direct-tls"
 	FrontendCaddyUnixH2C = "caddy-unix-h2c"
 	DefaultGatewaySocket = "/run/xconnect-gateway/xray.sock"
+
+	ConnectionModeWGVLESSL3 = "wg_vless_l3"
+	ConnectionModeWGUDPL3   = "wg_udp_l3"
+	ConnectionModeWGVLESSL2 = "wg_vless_l2"
+	DefaultXrayStatsAddr    = "127.0.0.1:10087"
 )
+
+func ValidConnectionMode(mode string) bool {
+	switch strings.TrimSpace(mode) {
+	case "", ConnectionModeWGVLESSL3, ConnectionModeWGUDPL3, ConnectionModeWGVLESSL2:
+		return true
+	default:
+		return false
+	}
+}
 
 type SigningKey struct {
 	KeyID     string     `json:"key_id"`
@@ -56,45 +70,57 @@ type Signature struct {
 }
 
 type Config struct {
-	SchemaVersion int         `json:"schema_version"`
-	Role          string      `json:"role"`
-	ConfigID      string      `json:"config_id"`
-	NetworkID     string      `json:"network_id"`
-	GatewayID     string      `json:"gateway_id"`
-	Generation    uint64      `json:"generation"`
-	IssuedAt      time.Time   `json:"issued_at"`
-	ExpiresAt     time.Time   `json:"expires_at"`
-	InterfaceName string      `json:"interface_name"`
-	Address       string      `json:"address"`
-	ListenPort    int         `json:"listen_port"`
-	MTU           int         `json:"mtu"`
-	Peers         []Peer      `json:"peers"`
-	Transport     Transport   `json:"transport"`
-	Mesh          *relay.Spec `json:"mesh,omitempty"`
-	Signature     Signature   `json:"signature"`
+	SchemaVersion  int         `json:"schema_version"`
+	Role           string      `json:"role"`
+	ConfigID       string      `json:"config_id"`
+	NetworkID      string      `json:"network_id"`
+	GatewayID      string      `json:"gateway_id"`
+	Generation     uint64      `json:"generation"`
+	IssuedAt       time.Time   `json:"issued_at"`
+	ExpiresAt      time.Time   `json:"expires_at"`
+	ConnectionMode string      `json:"connection_mode,omitempty"`
+	InterfaceName  string      `json:"interface_name"`
+	Address        string      `json:"address"`
+	ListenPort     int         `json:"listen_port"`
+	MTU            int         `json:"mtu"`
+	Peers          []Peer      `json:"peers"`
+	Transport      Transport   `json:"transport"`
+	Mesh           *relay.Spec `json:"mesh,omitempty"`
+	Signature      Signature   `json:"signature"`
+}
+
+func (c Config) EffectiveConnectionMode() string {
+	if mode := strings.TrimSpace(c.ConnectionMode); mode != "" {
+		return mode
+	}
+	return ConnectionModeWGVLESSL3
 }
 
 func (c Config) signingBytes() ([]byte, error) {
 	return json.Marshal(struct {
-		SchemaVersion int         `json:"schema_version"`
-		Role          string      `json:"role"`
-		ConfigID      string      `json:"config_id"`
-		NetworkID     string      `json:"network_id"`
-		GatewayID     string      `json:"gateway_id"`
-		Generation    uint64      `json:"generation"`
-		IssuedAt      time.Time   `json:"issued_at"`
-		ExpiresAt     time.Time   `json:"expires_at"`
-		InterfaceName string      `json:"interface_name"`
-		Address       string      `json:"address"`
-		ListenPort    int         `json:"listen_port"`
-		MTU           int         `json:"mtu"`
-		Peers         []Peer      `json:"peers"`
-		Transport     Transport   `json:"transport"`
-		Mesh          *relay.Spec `json:"mesh,omitempty"`
-	}{c.SchemaVersion, c.Role, c.ConfigID, c.NetworkID, c.GatewayID, c.Generation, c.IssuedAt, c.ExpiresAt, c.InterfaceName, c.Address, c.ListenPort, c.MTU, c.Peers, c.Transport, c.Mesh})
+		SchemaVersion  int         `json:"schema_version"`
+		Role           string      `json:"role"`
+		ConfigID       string      `json:"config_id"`
+		NetworkID      string      `json:"network_id"`
+		GatewayID      string      `json:"gateway_id"`
+		Generation     uint64      `json:"generation"`
+		IssuedAt       time.Time   `json:"issued_at"`
+		ExpiresAt      time.Time   `json:"expires_at"`
+		ConnectionMode string      `json:"connection_mode,omitempty"`
+		InterfaceName  string      `json:"interface_name"`
+		Address        string      `json:"address"`
+		ListenPort     int         `json:"listen_port"`
+		MTU            int         `json:"mtu"`
+		Peers          []Peer      `json:"peers"`
+		Transport      Transport   `json:"transport"`
+		Mesh           *relay.Spec `json:"mesh,omitempty"`
+	}{c.SchemaVersion, c.Role, c.ConfigID, c.NetworkID, c.GatewayID, c.Generation, c.IssuedAt, c.ExpiresAt, strings.TrimSpace(c.ConnectionMode), c.InterfaceName, c.Address, c.ListenPort, c.MTU, c.Peers, c.Transport, c.Mesh})
 }
 
-func (c Config) Verify(keys []SigningKey, now time.Time) error {
+func (c Config) ValidateStructure(now time.Time) error {
+	if !ValidConnectionMode(c.ConnectionMode) {
+		return errors.New("invalid gateway connection mode")
+	}
 	if c.Mesh != nil {
 		known := map[string]string{}
 		for _, p := range c.Peers {
@@ -121,7 +147,7 @@ func (c Config) Verify(keys []SigningKey, now time.Time) error {
 		}
 	}
 
-	if c.SchemaVersion != 1 || c.Role != Role || c.ConfigID == "" || c.NetworkID == "" || c.GatewayID == "" || c.Generation == 0 || c.InterfaceName == "" || len(c.InterfaceName) > 15 || c.ListenPort < 1 || c.ListenPort > 65535 || c.MTU < 576 || (c.Transport.Kind != "" && c.Transport.Kind != "vless-xhttp") || c.Transport.Port != 443 || c.Transport.ServerName == "" || c.Transport.AuthID == "" || c.Signature.Algorithm != "Ed25519" || !c.ExpiresAt.After(now) || c.IssuedAt.After(now.Add(30*time.Second)) {
+	if c.SchemaVersion != 1 || c.Role != Role || c.ConfigID == "" || c.NetworkID == "" || c.GatewayID == "" || c.Generation == 0 || c.InterfaceName == "" || len(c.InterfaceName) > 15 || c.ListenPort < 1 || c.ListenPort > 65535 || c.MTU < 576 || (c.Transport.Kind != "" && c.Transport.Kind != "vless-xhttp") || c.Transport.Port != 443 || c.Transport.ServerName == "" || c.Transport.AuthID == "" || !c.ExpiresAt.After(now) || c.IssuedAt.After(now.Add(30*time.Second)) {
 		return errors.New("invalid gateway signed config")
 	}
 	frontend := c.Transport.Frontend
@@ -167,9 +193,25 @@ func (c Config) Verify(keys []SigningKey, now time.Time) error {
 			return errors.New("invalid peer public key")
 		}
 	}
+	return nil
+}
+
+func (c Config) Verify(keys []SigningKey, now time.Time) error {
+	if err := c.ValidateStructure(now); err != nil {
+		return err
+	}
+	if c.Signature.Algorithm != "Ed25519" {
+		return errors.New("invalid gateway signed config")
+	}
 	payload, err := c.signingBytes()
 	if err != nil {
 		return err
+	}
+	var legacyPayload []byte
+	if strings.TrimSpace(c.ConnectionMode) != "" {
+		legacy := c
+		legacy.ConnectionMode = ""
+		legacyPayload, _ = legacy.signingBytes()
 	}
 	sig, err := base64.StdEncoding.DecodeString(c.Signature.Value)
 	if err != nil || len(sig) != ed25519.SignatureSize {
@@ -180,8 +222,10 @@ func (c Config) Verify(keys []SigningKey, now time.Time) error {
 			continue
 		}
 		publicKey, decodeErr := base64.StdEncoding.DecodeString(key.PublicKey)
-		if decodeErr == nil && len(publicKey) == ed25519.PublicKeySize && ed25519.Verify(publicKey, payload, sig) {
-			return nil
+		if decodeErr == nil && len(publicKey) == ed25519.PublicKeySize {
+			if ed25519.Verify(publicKey, payload, sig) || (len(legacyPayload) > 0 && ed25519.Verify(publicKey, legacyPayload, sig)) {
+				return nil
+			}
 		}
 	}
 	return errors.New("gateway config signature is not trusted")
