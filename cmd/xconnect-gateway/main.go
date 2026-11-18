@@ -149,7 +149,11 @@ func syncConfig(ctx context.Context, args []string, apply bool) error {
 	}
 	state, err := gateway.LoadState(*dir)
 	if err != nil {
-		return err
+		var pendingErr error
+		state, pendingErr = gateway.LoadPendingState(*dir)
+		if pendingErr != nil {
+			return err
+		}
 	}
 	client, err := gateway.NewClient(state.Controller)
 	if err != nil {
@@ -498,7 +502,11 @@ func status(args []string) error {
 	}
 	state, err := gateway.LoadState(*dir)
 	if err != nil {
-		return err
+		var pendingErr error
+		state, pendingErr = gateway.LoadPendingState(*dir)
+		if pendingErr != nil {
+			return err
+		}
 	}
 	if *asJSON {
 		raw, _ := json.MarshalIndent(state, "", "  ")
