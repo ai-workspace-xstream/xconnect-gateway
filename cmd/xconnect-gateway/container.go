@@ -2,13 +2,17 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/ai-workspace-xstream/XConnect-Gateway/internal/gateway"
 )
 
 type runtimeKey struct{}
@@ -115,16 +119,12 @@ func serveContainer(parent context.Context, args []string) error {
 	defer runtime.xray.stop()
 	defer runtime.relay.stop()
 	ctx = context.WithValue(ctx, runtimeKey{}, runtime)
-	ticker := time.NewTicker(time.Minute)
+
+	_ = applyCmd(ctx, args)
+
+	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
-		err := syncConfig(ctx, args, true)
-		if ctx.Err() != nil {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
 		select {
 		case <-ctx.Done():
 			return nil
@@ -133,6 +133,18 @@ func serveContainer(parent context.Context, args []string) error {
 		case <-runtime.relay.done:
 			return errors.New("Gateway relay exited")
 		case <-ticker.C:
+			f, dir := common("serve", args)
+			_ = f.Parse(args)
+			cfgRaw, err := os.ReadFile(filepath.Join(*dir, "runtime", "signed-config.json"))
+			if err == nil {
+				var cfg gateway.Config
+				if err := json.Unmarshal(cfgRaw, &cfg); err == nil {
+					wgRunning := interfaceExists(ctx, cfg.InterfaceName)
+					xrayRunning := runtime.xrayActive(ctx)
+					relayRunning := cfg.Mesh != nil
+					_ = gateway.CollectAndWriteTelemetry(ctx, *dir, cfg, wgRunning, xrayRunning, relayRunning)
+				}
+			}
 		}
 	}
 }

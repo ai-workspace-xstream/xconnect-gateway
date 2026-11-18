@@ -6,9 +6,11 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -28,7 +30,7 @@ func main() {
 }
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: xconnect-gateway <init|join|sync|up|serve|down|status|diagnose>")
+		return errors.New("usage: xconnect-gateway <init|join|apply|sync|up|serve|down|status|diagnose>")
 	}
 	switch args[0] {
 	case "serve":
@@ -39,6 +41,8 @@ func run(ctx context.Context, args []string) error {
 		return initState(ctx, args[1:])
 	case "join":
 		return join(ctx, args[1:])
+	case "apply":
+		return applyCmd(ctx, args[1:])
 	case "sync":
 		return syncConfig(ctx, args[1:], false)
 	case "up":
@@ -340,14 +344,166 @@ func down(args []string) error {
 	}
 	return command(context.Background(), "wg-quick", "down", matches[0])
 }
-func status(args []string) error {
-	f, dir := common("status", args)
+func applyCmd(ctx context.Context, args []string) error {
+	f, dir := common("apply", args)
+	configPath := f.String("config", "", "path to signed-config.json or '-' for stdin")
+	cert := f.String("tls-cert", "/etc/xconnect-gateway/tls.crt", "VLESS TLS certificate")
+	key := f.String("tls-key", "/etc/xconnect-gateway/tls.key", "VLESS TLS private key")
+	frontend := f.String("frontend", os.Getenv("XCONNECT_GATEWAY_FRONTEND"), "Gateway frontend mode: direct-tls or caddy-unix-h2c")
+	socket := f.String("listen-socket", os.Getenv("XCONNECT_GATEWAY_LISTEN_SOCKET"), "Gateway listen socket path for caddy-unix-h2c")
+	dryRun := f.Bool("dry-run", false, "validate configuration without applying")
+	telemetry := f.Bool("write-telemetry", true, "generate local non-secret runtime telemetry files")
 	if err := f.Parse(args); err != nil {
 		return err
+	}
+
+	state, err := gateway.LoadState(*dir)
+	if err != nil {
+		var pendingErr error
+		state, pendingErr = gateway.LoadPendingState(*dir)
+		if pendingErr != nil {
+			return fmt.Errorf("loading gateway state: %w", err)
+		}
+	}
+
+	var rawConfig []byte
+	cfgPath := *configPath
+	if cfgPath == "-" {
+		var readErr error
+		rawConfig, readErr = io.ReadAll(os.Stdin)
+		if readErr != nil {
+			return fmt.Errorf("reading config from stdin: %w", readErr)
+		}
+	} else {
+		if cfgPath == "" {
+			cfgPath = filepath.Join(*dir, "runtime", "signed-config.json")
+		}
+		var readErr error
+		rawConfig, readErr = os.ReadFile(cfgPath)
+		if readErr != nil {
+			return fmt.Errorf("reading signed config %s: %w", cfgPath, readErr)
+		}
+	}
+
+	var cfg gateway.Config
+	if err := json.Unmarshal(rawConfig, &cfg); err != nil {
+		return fmt.Errorf("unmarshaling signed config: %w", err)
+	}
+
+	if cfg.GatewayID != state.GatewayID || (state.NetworkID != "" && cfg.NetworkID != state.NetworkID) {
+		return errors.New("signed config binding mismatch")
+	}
+
+	now := time.Now().UTC()
+	if err := cfg.ValidateStructure(now); err != nil {
+		return fmt.Errorf("validating config structure: %w", err)
+	}
+	if len(state.SigningKeys) > 0 {
+		if err := cfg.Verify(state.SigningKeys, now); err != nil {
+			return fmt.Errorf("verifying signed config: %w", err)
+		}
+	}
+
+	if *frontend != "" && cfg.Transport.Frontend == "" {
+		cfg.Transport.Frontend = *frontend
+	}
+	if *socket != "" && cfg.Transport.ListenSocket == "" {
+		cfg.Transport.ListenSocket = *socket
+	}
+
+	if err := gateway.SaveSignedConfig(*dir, cfg); err != nil {
+		return err
+	}
+	if err := gateway.WriteRuntime(*dir, cfg, state.PrivateKey, *cert, *key); err != nil {
+		return err
+	}
+
+	if *dryRun {
+		fmt.Printf("Gateway config %s generation %d validated successfully (dry-run)\n", cfg.ConfigID, cfg.Generation)
+		return nil
+	}
+
+	if os.Geteuid() != 0 {
+		return errors.New("apply must run as root")
+	}
+
+	if state.AppliedConfigID != cfg.ConfigID || state.AppliedGeneration != cfg.Generation || !interfaceExists(ctx, cfg.InterfaceName) {
+		if err := applyRuntime(ctx, *dir, cfg); err != nil {
+			return err
+		}
+	}
+
+	runtime := serviceRuntime(ctx)
+	if err := runtime.reconcileRelay(ctx, *dir, cfg.Mesh != nil); err != nil {
+		return err
+	}
+
+	xrayPath := filepath.Join(*dir, "runtime", "xray.json")
+	appliedXrayPath := filepath.Join(*dir, "runtime", "xray-applied.sha256")
+	appliedXray, readErr := os.ReadFile(appliedXrayPath)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return readErr
+	}
+
+	currentXray, err := os.ReadFile(xrayPath)
+	if err != nil {
+		return err
+	}
+	active := runtime.xrayActive(ctx)
+	digest := fmt.Sprintf("%x", sha256.Sum256(currentXray))
+	if xrayRestartRequired(string(appliedXray), digest, active) {
+		if err := command(ctx, "xray", "run", "-test", "-config", xrayPath); err != nil {
+			return err
+		}
+		if err := runtime.restartXray(ctx, xrayPath); err != nil {
+			return err
+		}
+		if err := os.WriteFile(appliedXrayPath, []byte(digest), 0o600); err != nil {
+			return err
+		}
+	}
+
+	state.AppliedConfigID = cfg.ConfigID
+	state.AppliedGeneration = cfg.Generation
+	if state.NetworkID == "" {
+		state.NetworkID = cfg.NetworkID
+	}
+	if err := gateway.SaveState(*dir, state); err != nil {
+		return err
+	}
+
+	if *telemetry {
+		wgRunning := interfaceExists(ctx, cfg.InterfaceName)
+		xrayRunning := runtime.xrayActive(ctx)
+		relayRunning := cfg.Mesh != nil
+		_ = gateway.CollectAndWriteTelemetry(ctx, *dir, cfg, wgRunning, xrayRunning, relayRunning)
+	}
+
+	fmt.Printf("Gateway config %s generation %d applied\n", cfg.ConfigID, cfg.Generation)
+	return nil
+}
+
+func status(args []string) error {
+	f, dir := common("status", args)
+	asJSON := f.Bool("json", false, "output runtime telemetry as JSON")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *asJSON {
+		telPath := filepath.Join(*dir, "runtime", "gateway-telemetry.json")
+		if raw, err := os.ReadFile(telPath); err == nil {
+			fmt.Println(string(raw))
+			return nil
+		}
 	}
 	state, err := gateway.LoadState(*dir)
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		raw, _ := json.MarshalIndent(state, "", "  ")
+		fmt.Println(string(raw))
+		return nil
 	}
 	fmt.Printf("gateway=%s network=%s applied_generation=%d config=%s\n", state.GatewayID, state.NetworkID, state.AppliedGeneration, state.AppliedConfigID)
 	return nil
