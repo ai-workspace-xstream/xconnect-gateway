@@ -9,18 +9,20 @@ import (
 )
 
 type State struct {
-	SchemaVersion       int              `json:"schema_version"`
-	Controller          string           `json:"controller"`
-	GatewayID           string           `json:"gateway_id"`
-	NetworkID           string           `json:"network_id"`
-	PrivateKey          string           `json:"wireguard_private_key"`
-	PublicKey           string           `json:"wireguard_public_key"`
-	Credential          DeviceCredential `json:"device_credential"`
-	SigningKeys         []SigningKey     `json:"signing_keys"`
-	EnrollmentToken     string           `json:"enrollment_token,omitempty"`
-	EnrollmentExpiresAt time.Time        `json:"enrollment_expires_at,omitempty"`
-	AppliedConfigID     string           `json:"applied_config_id,omitempty"`
-	AppliedGeneration   uint64           `json:"applied_generation,omitempty"`
+	SchemaVersion         int              `json:"schema_version"`
+	Controller            string           `json:"controller"`
+	GatewayID             string           `json:"gateway_id"`
+	NetworkID             string           `json:"network_id"`
+	PrivateKey            string           `json:"wireguard_private_key"`
+	PublicKey             string           `json:"wireguard_public_key"`
+	Credential            DeviceCredential `json:"device_credential"`
+	SigningKeys           []SigningKey     `json:"signing_keys"`
+	EnrollmentToken       string           `json:"enrollment_token,omitempty"`
+	EnrollmentExpiresAt   time.Time        `json:"enrollment_expires_at,omitempty"`
+	AppliedConfigID       string           `json:"applied_config_id,omitempty"`
+	AppliedGeneration     uint64           `json:"applied_generation,omitempty"`
+	AppliedPolicyRevision uint64           `json:"applied_policy_revision,omitempty"`
+	AppliedPolicyDigest   string           `json:"applied_policy_digest,omitempty"`
 }
 
 func LoadPendingState(dir string) (State, error) {

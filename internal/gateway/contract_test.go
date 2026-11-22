@@ -144,3 +144,105 @@ func TestLegacyAccountsSignedConfigWithoutKindAndFrontend(t *testing.T) {
 	}
 }
 
+func TestSignedGatewayConfigV2WithPolicyAndValidation(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	keys := []SigningKey{{KeyID: "key-1", Algorithm: "Ed25519", PublicKey: base64.StdEncoding.EncodeToString(publicKey), Status: "current", NotBefore: now.Add(-time.Minute)}}
+
+	base := Config{
+		SchemaVersion:  2,
+		Role:           Role,
+		ConfigID:       "cfg-v2",
+		NetworkID:      "net-1",
+		GatewayID:      "gw-1",
+		Generation:     42,
+		IssuedAt:       now,
+		ExpiresAt:      now.Add(10 * time.Minute),
+		ConnectionMode: ConnectionModeWGVLESSL3,
+		InterfaceName:  "xconzero0",
+		Address:        "10.66.0.1/32",
+		ListenPort:     51820,
+		MTU:            1420,
+		Peers: []Peer{
+			{DeviceID: "mac", WireGuardPublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)), WireGuardAddress: "10.66.0.2/32", AllowedIPs: "10.66.0.2/32"},
+			{DeviceID: "bot", WireGuardPublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)), WireGuardAddress: "10.66.0.4/32", AllowedIPs: "10.66.0.4/32"},
+		},
+		Transport: Transport{Kind: "vless-xhttp", ServerName: "gw.example.test", Port: 443, AuthID: "11111111-1111-1111-1111-111111111111", Path: "/xconnect", Mode: "auto", Host: "gw.example.test"},
+		Policy: &PolicyArtifact{
+			SchemaVersion:   1,
+			CompilerVersion: "xconnect-policy-v1",
+			NetworkID:       "net-1",
+			Revision:        42,
+			DefaultAction:   "deny",
+			ProtectedFlows:  []string{"control:controller-session"},
+			Rules: []PolicyRule{{
+				ID:                 "allow-mac-bot",
+				Action:             "allow",
+				SourceDevices:      []string{"mac"},
+				DestinationDevices: []string{"bot"},
+				Protocols:          []string{"icmp", "tcp"},
+				Ports:              []int{22, 8080},
+			}},
+		},
+		Signature: Signature{Algorithm: "Ed25519", KeyID: "key-1"},
+	}
+
+	payload, err := base.SigningBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.Signature.Value = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, payload))
+	if err := base.Verify(keys, now); err != nil {
+		t.Fatalf("expected valid v2 policy config to verify: %v", err)
+	}
+
+	// Tampering with policy must invalidate Ed25519 signature.
+	tampered := base
+	tamperedPolicy := *base.Policy
+	tamperedPolicy.DefaultAction = "allow"
+	tampered.Policy = &tamperedPolicy
+	if err := tampered.Verify(keys, now); err == nil {
+		t.Fatal("expected tampered policy default_action to fail signature verification")
+	}
+
+	// SchemaVersion 1 with attached policy must fail structural validation.
+	v1WithPolicy := base
+	v1WithPolicy.SchemaVersion = 1
+	if err := v1WithPolicy.ValidateStructure(now); err == nil {
+		t.Fatal("expected v1 config with attached policy to fail validation")
+	}
+
+	// Invalid policy variants must be rejected.
+	invalidCases := []struct {
+		name   string
+		mutate func(*PolicyArtifact)
+	}{
+		{name: "network mismatch", mutate: func(p *PolicyArtifact) { p.NetworkID = "other-net" }},
+		{name: "bad default action", mutate: func(p *PolicyArtifact) { p.DefaultAction = "reject" }},
+		{name: "bad rule action", mutate: func(p *PolicyArtifact) { p.Rules[0].Action = "drop" }},
+		{name: "duplicate rule id", mutate: func(p *PolicyArtifact) { p.Rules = append(p.Rules, p.Rules[0]) }},
+		{name: "icmp with ports", mutate: func(p *PolicyArtifact) { p.Rules[0].Protocols = []string{"icmp"}; p.Rules[0].Ports = []int{80} }},
+		{name: "port out of range", mutate: func(p *PolicyArtifact) { p.Rules[0].Ports = []int{70000} }},
+		{name: "bad protocol", mutate: func(p *PolicyArtifact) { p.Rules[0].Protocols = []string{"gre"} }},
+		{name: "empty source", mutate: func(p *PolicyArtifact) { p.Rules[0].SourceDevices = nil }},
+		{name: "too many rules", mutate: func(p *PolicyArtifact) {
+			p.Rules = make([]PolicyRule, 201)
+			for i := range p.Rules {
+				p.Rules[i] = PolicyRule{ID: "r-" + strings.Repeat("x", 1) + string(rune('a'+i%26)) + string(rune('0'+i/26)), Action: "allow", SourceDevices: []string{"*"}, DestinationDevices: []string{"*"}}
+			}
+		}},
+	}
+	for _, tc := range invalidCases {
+		cfg := base
+		pCopy := *base.Policy
+		pCopy.Rules = append([]PolicyRule(nil), base.Policy.Rules...)
+		tc.mutate(&pCopy)
+		cfg.Policy = &pCopy
+		if err := cfg.ValidateStructure(now); err == nil {
+			t.Fatalf("expected invalid policy case %q to fail ValidateStructure", tc.name)
+		}
+	}
+}

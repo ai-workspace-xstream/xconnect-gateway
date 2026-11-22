@@ -29,7 +29,7 @@ peerPub2\t(none)\t(none)\t10.77.0.3/32\t0\t0\t0\toff`, time.Now().Unix()-10)
 	}
 
 	cfg := Config{
-		SchemaVersion:  1,
+		SchemaVersion:  2,
 		Role:           Role,
 		ConfigID:       "cfg-telemetry-1",
 		NetworkID:      "net_uat",
@@ -41,13 +41,30 @@ peerPub2\t(none)\t(none)\t10.77.0.3/32\t0\t0\t0\toff`, time.Now().Unix()-10)
 			{DeviceID: "one-user2", WireGuardPublicKey: "peerPub2", WireGuardAddress: "10.77.0.3/32"},
 		},
 		Transport: Transport{ServerName: "tw-xconnect.svc.plus"},
+		Policy: &PolicyArtifact{
+			SchemaVersion: 1,
+			NetworkID:     "net_uat",
+			Revision:      5,
+			DefaultAction: "deny",
+			Rules: []PolicyRule{{
+				ID:                 "allow-icmp",
+				Action:             "allow",
+				SourceDevices:      []string{"one-user1"},
+				DestinationDevices: []string{"one-user2"},
+				Protocols:          []string{"icmp"},
+			}},
+		},
 	}
 
 	now := time.Now().UTC()
 	gt, osStatus := BuildTelemetry(cfg, peers, true, true, false, now)
+	gt.PolicyDigest = "abc123digest"
 
 	if gt.GatewayID != "gw-uat-tw-xconnect" || gt.NetworkID != "net_uat" {
 		t.Fatalf("unexpected gateway id or net: %+v", gt)
+	}
+	if gt.PolicyRevision != 5 || gt.PolicyDefaultAction != "deny" || gt.PolicyRuleCount != 1 || gt.PolicyDigest != "abc123digest" {
+		t.Fatalf("unexpected policy telemetry fields: %+v", gt)
 	}
 	if gt.Traffic.RxBytesTotal != 102400 || gt.Traffic.TxBytesTotal != 204800 {
 		t.Fatalf("unexpected traffic total: %+v", gt.Traffic)

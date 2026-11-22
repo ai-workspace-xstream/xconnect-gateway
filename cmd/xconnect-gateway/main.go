@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/ai-workspace-xstream/XConnect-Gateway/internal/gateway"
+	"github.com/ai-workspace-xstream/XConnect-Gateway/internal/policy"
 )
 
 func main() {
@@ -201,6 +202,10 @@ func syncConfig(ctx context.Context, args []string, apply bool) error {
 	if err := gateway.WriteRuntime(*dir, cfg, state.PrivateKey, *cert, *key); err != nil {
 		return err
 	}
+	ruleset, err := compileAndWritePolicy(*dir, cfg)
+	if err != nil {
+		return err
+	}
 	if apply {
 		if os.Geteuid() != 0 {
 			return errors.New("up must run as root")
@@ -209,6 +214,9 @@ func syncConfig(ctx context.Context, args []string, apply bool) error {
 			if err := applyRuntime(ctx, *dir, cfg); err != nil {
 				return err
 			}
+		}
+		if err := policy.Apply(ctx, ruleset); err != nil {
+			return err
 		}
 		runtime := serviceRuntime(ctx)
 		if err := runtime.reconcileRelay(ctx, *dir, cfg.Mesh != nil); err != nil {
@@ -236,6 +244,8 @@ func syncConfig(ctx context.Context, args []string, apply bool) error {
 		}
 		state.AppliedConfigID = cfg.ConfigID
 		state.AppliedGeneration = cfg.Generation
+		state.AppliedPolicyRevision = ruleset.Revision
+		state.AppliedPolicyDigest = ruleset.Digest
 	}
 	if err := gateway.SaveState(*dir, state); err != nil {
 		return err
@@ -342,6 +352,11 @@ func down(args []string) error {
 	}
 	_ = exec.Command("systemctl", "stop", "xconnect-gateway-relay.service").Run()
 	_ = exec.Command("systemctl", "stop", "xconnect-gateway-xray.service").Run()
+	if iface := downInterfaceName(*dir); iface != "" {
+		if err := policy.Teardown(context.Background(), iface); err != nil {
+			fmt.Fprintf(os.Stderr, "xconnect-gateway: policy teardown warning: %v\n", err)
+		}
+	}
 	matches, _ := filepath.Glob(filepath.Join(*dir, "runtime", "*.conf"))
 	if len(matches) != 1 {
 		return errors.New("owned WireGuard config not found")
@@ -421,6 +436,10 @@ func applyCmd(ctx context.Context, args []string) error {
 	if err := gateway.WriteRuntime(*dir, cfg, state.PrivateKey, *cert, *key); err != nil {
 		return err
 	}
+	ruleset, err := compileAndWritePolicy(*dir, cfg)
+	if err != nil {
+		return fmt.Errorf("compiling gateway forwarding policy: %w", err)
+	}
 
 	if *dryRun {
 		fmt.Printf("Gateway config %s generation %d validated successfully (dry-run)\n", cfg.ConfigID, cfg.Generation)
@@ -435,6 +454,9 @@ func applyCmd(ctx context.Context, args []string) error {
 		if err := applyRuntime(ctx, *dir, cfg); err != nil {
 			return err
 		}
+	}
+	if err := policy.Apply(ctx, ruleset); err != nil {
+		return fmt.Errorf("applying gateway forwarding policy: %w", err)
 	}
 
 	runtime := serviceRuntime(ctx)
@@ -469,6 +491,8 @@ func applyCmd(ctx context.Context, args []string) error {
 
 	state.AppliedConfigID = cfg.ConfigID
 	state.AppliedGeneration = cfg.Generation
+	state.AppliedPolicyRevision = ruleset.Revision
+	state.AppliedPolicyDigest = ruleset.Digest
 	if state.NetworkID == "" {
 		state.NetworkID = cfg.NetworkID
 	}
@@ -480,11 +504,48 @@ func applyCmd(ctx context.Context, args []string) error {
 		wgRunning := interfaceExists(ctx, cfg.InterfaceName)
 		xrayRunning := runtime.xrayActive(ctx)
 		relayRunning := cfg.Mesh != nil
-		_ = gateway.CollectAndWriteTelemetry(ctx, *dir, cfg, wgRunning, xrayRunning, relayRunning)
+		_ = gateway.CollectAndWriteTelemetryWithPolicy(ctx, *dir, cfg, wgRunning, xrayRunning, relayRunning, ruleset.Digest)
 	}
 
 	fmt.Printf("Gateway config %s generation %d applied\n", cfg.ConfigID, cfg.Generation)
 	return nil
+}
+
+func compileAndWritePolicy(dir string, cfg gateway.Config) (policy.CompiledRuleset, error) {
+	ruleset, err := policy.Compile(cfg.InterfaceName, cfg.Peers, cfg.Policy)
+	if err != nil {
+		return ruleset, err
+	}
+	for _, warning := range ruleset.Warnings {
+		fmt.Fprintf(os.Stderr, "xconnect-gateway: policy warning: %s\n", warning)
+	}
+	runtimeDir := filepath.Join(dir, "runtime")
+	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+		return ruleset, err
+	}
+	rulesPath := filepath.Join(runtimeDir, "policy-compiled.rules")
+	tmpPath := filepath.Join(runtimeDir, ".policy-compiled.rules.tmp")
+	if err := os.WriteFile(tmpPath, []byte(policy.RenderCombinedArtifact(ruleset)), 0o600); err != nil {
+		return ruleset, err
+	}
+	if err := os.Rename(tmpPath, rulesPath); err != nil {
+		return ruleset, err
+	}
+	return ruleset, nil
+}
+
+func downInterfaceName(dir string) string {
+	if raw, err := os.ReadFile(filepath.Join(dir, "runtime", "signed-config.json")); err == nil {
+		var cfg gateway.Config
+		if json.Unmarshal(raw, &cfg) == nil && strings.TrimSpace(cfg.InterfaceName) != "" {
+			return strings.TrimSpace(cfg.InterfaceName)
+		}
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, "runtime", "*.conf"))
+	if len(matches) == 1 {
+		return strings.TrimSuffix(filepath.Base(matches[0]), ".conf")
+	}
+	return ""
 }
 
 func status(args []string) error {
@@ -513,11 +574,11 @@ func status(args []string) error {
 		fmt.Println(string(raw))
 		return nil
 	}
-	fmt.Printf("gateway=%s network=%s applied_generation=%d config=%s\n", state.GatewayID, state.NetworkID, state.AppliedGeneration, state.AppliedConfigID)
+	fmt.Printf("gateway=%s network=%s applied_generation=%d config=%s policy_revision=%d policy_digest=%s\n", state.GatewayID, state.NetworkID, state.AppliedGeneration, state.AppliedConfigID, state.AppliedPolicyRevision, state.AppliedPolicyDigest)
 	return nil
 }
 func diagnose() error {
-	for _, name := range []string{"wg", "wg-quick", "xray", "systemctl"} {
+	for _, name := range []string{"wg", "wg-quick", "xray", "iptables", "iptables-restore", "systemctl"} {
 		path, err := exec.LookPath(name)
 		if err != nil {
 			return fmt.Errorf("required runtime %s unavailable", name)
