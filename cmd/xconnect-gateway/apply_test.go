@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,5 +115,116 @@ func TestApplyCmdDryRunAndSignedConfigValidation(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "runtime", "xray.json")); err != nil {
 		t.Fatalf("xray.json not written: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "runtime", "policy-compiled.rules")); err != nil {
+		t.Fatalf("policy-compiled.rules not written: %v", err)
+	}
+}
+
+func TestApplyCmdDryRunSignedV2PolicyCompilesDynamicRules(t *testing.T) {
+	dir := t.TempDir()
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	state := gateway.State{
+		SchemaVersion: 1,
+		Controller:    "https://accounts.svc.plus",
+		GatewayID:     "gw-ph-01",
+		NetworkID:     "net_prod",
+		PrivateKey:    "test-privkey",
+		PublicKey:     base64.StdEncoding.EncodeToString(pub),
+		SigningKeys: []gateway.SigningKey{
+			{KeyID: "key-1", Algorithm: "Ed25519", PublicKey: base64.StdEncoding.EncodeToString(pub), Status: "current", NotBefore: now.Add(-time.Hour)},
+		},
+		Credential: gateway.DeviceCredential{Credential: "cred-123"},
+	}
+	if err := gateway.SaveState(dir, state); err != nil {
+		t.Fatal(err)
+	}
+
+	peerKey := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	cfg := gateway.Config{
+		SchemaVersion:  2,
+		Role:           gateway.Role,
+		ConfigID:       "cfg-v2-apply",
+		NetworkID:      "net_prod",
+		GatewayID:      "gw-ph-01",
+		Generation:     12,
+		IssuedAt:       now,
+		ExpiresAt:      now.Add(time.Hour),
+		ConnectionMode: gateway.ConnectionModeWGVLESSL3,
+		InterfaceName:  "xconzero0",
+		Address:        "10.66.0.1/32",
+		ListenPort:     51820,
+		MTU:            1420,
+		Peers: []gateway.Peer{
+			{DeviceID: "mac", WireGuardPublicKey: peerKey, WireGuardAddress: "10.66.0.2/32", AllowedIPs: "10.66.0.2/32"},
+			{DeviceID: "bot", WireGuardPublicKey: peerKey, WireGuardAddress: "10.66.0.4/32", AllowedIPs: "10.66.0.4/32"},
+		},
+		Transport: gateway.Transport{
+			Kind:         "vless-xhttp",
+			ServerName:   "ph-xconnect.svc.plus",
+			Port:         443,
+			AuthID:       "11111111-1111-1111-1111-111111111111",
+			Frontend:     gateway.FrontendCaddyUnixH2C,
+			ListenSocket: gateway.DefaultGatewaySocket,
+		},
+		Policy: &gateway.PolicyArtifact{
+			SchemaVersion:   1,
+			CompilerVersion: "xconnect-policy-v1",
+			NetworkID:       "net_prod",
+			Revision:        12,
+			DefaultAction:   "deny",
+			ProtectedFlows:  []string{"control:controller-session"},
+			Rules: []gateway.PolicyRule{{
+				ID:                 "allow-mac-bot",
+				Action:             "allow",
+				SourceDevices:      []string{"mac"},
+				DestinationDevices: []string{"bot"},
+				Protocols:          []string{"icmp", "tcp"},
+				Ports:              []int{8080},
+			}},
+		},
+		Signature: gateway.Signature{Algorithm: "Ed25519", KeyID: "key-1"},
+	}
+
+	payload, err := cfg.SigningBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Signature.Value = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, payload))
+
+	cfgPath := filepath.Join(dir, "signed-v2.json")
+	rawJSON, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, rawJSON, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := applyCmd(context.Background(), []string{"--state-dir", dir, "--config", cfgPath, "--dry-run"}); err != nil {
+		t.Fatalf("dry-run apply v2 policy failed: %v", err)
+	}
+
+	rulesBytes, err := os.ReadFile(filepath.Join(dir, "runtime", "policy-compiled.rules"))
+	if err != nil {
+		t.Fatalf("read policy-compiled.rules failed: %v", err)
+	}
+	rulesText := string(rulesBytes)
+	for _, want := range []string{
+		":XCONNECT_ZERO_FWD - [0:0]",
+		"-A XCONNECT_ZERO_FWD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+		"-A XCONNECT_ZERO_FWD -s 10.66.0.2/32 -d 10.66.0.4/32 -p icmp",
+		"-A XCONNECT_ZERO_FWD -s 10.66.0.2/32 -d 10.66.0.4/32 -p tcp --dport 8080",
+		`-A XCONNECT_ZERO_FWD -m comment --comment "xcz:rev=12:default=deny" -j DROP`,
+	} {
+		if !strings.Contains(rulesText, want) {
+			t.Fatalf("compiled rules missing %q:\n%s", want, rulesText)
+		}
 	}
 }

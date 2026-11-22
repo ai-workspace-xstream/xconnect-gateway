@@ -40,6 +40,10 @@ type GatewayTelemetry struct {
 	ConnectionMode      string                 `json:"connection_mode,omitempty"`
 	AppliedConfigID     string                 `json:"applied_config_id,omitempty"`
 	AppliedGeneration   uint64                 `json:"applied_generation,omitempty"`
+	PolicyRevision      uint64                 `json:"policy_revision,omitempty"`
+	PolicyDefaultAction string                 `json:"policy_default_action,omitempty"`
+	PolicyRuleCount     int                    `json:"policy_rule_count,omitempty"`
+	PolicyDigest        string                 `json:"policy_digest,omitempty"`
 	WireGuardRunning    bool                   `json:"wireguard_running"`
 	XrayRunning         bool                   `json:"xray_running"`
 	RelayRunning        bool                   `json:"relay_running"`
@@ -185,6 +189,17 @@ func BuildTelemetry(cfg Config, dumpPeers []WgDumpPeer, wgRunning, xrayRunning, 
 		healthy = healthy && xrayRunning
 	}
 
+	policyRevision := uint64(0)
+	policyDefaultAction := "deny"
+	policyRuleCount := 0
+	if cfg.Policy != nil {
+		policyRevision = cfg.Policy.Revision
+		if action := strings.TrimSpace(cfg.Policy.DefaultAction); action != "" {
+			policyDefaultAction = action
+		}
+		policyRuleCount = len(cfg.Policy.Rules)
+	}
+
 	gt := GatewayTelemetry{
 		SchemaVersion:       1,
 		NetworkID:           cfg.NetworkID,
@@ -193,6 +208,9 @@ func BuildTelemetry(cfg Config, dumpPeers []WgDumpPeer, wgRunning, xrayRunning, 
 		ConnectionMode:      mode,
 		AppliedConfigID:     cfg.ConfigID,
 		AppliedGeneration:   cfg.Generation,
+		PolicyRevision:      policyRevision,
+		PolicyDefaultAction: policyDefaultAction,
+		PolicyRuleCount:     policyRuleCount,
 		WireGuardRunning:    wgRunning,
 		XrayRunning:         xrayRunning,
 		RelayRunning:        relayRunning,
@@ -232,6 +250,12 @@ func BuildTelemetry(cfg Config, dumpPeers []WgDumpPeer, wgRunning, xrayRunning, 
 }
 
 func CollectAndWriteTelemetry(ctx context.Context, dir string, cfg Config, wgRunning, xrayRunning, relayRunning bool) error {
+	return CollectAndWriteTelemetryWithPolicy(ctx, dir, cfg, wgRunning, xrayRunning, relayRunning, "")
+}
+
+// CollectAndWriteTelemetryWithPolicy samples local runtime stats and persists
+// telemetry including the applied policy digest computed by the enforcer.
+func CollectAndWriteTelemetryWithPolicy(ctx context.Context, dir string, cfg Config, wgRunning, xrayRunning, relayRunning bool, policyDigest string) error {
 	var dumpPeers []WgDumpPeer
 	if wgRunning && cfg.InterfaceName != "" {
 		if raw, err := exec.CommandContext(ctx, "wg", "show", cfg.InterfaceName, "dump").Output(); err == nil {
@@ -239,6 +263,7 @@ func CollectAndWriteTelemetry(ctx context.Context, dir string, cfg Config, wgRun
 		}
 	}
 	gt, osStatus := BuildTelemetry(cfg, dumpPeers, wgRunning, xrayRunning, relayRunning, time.Now())
+	gt.PolicyDigest = strings.TrimSpace(policyDigest)
 	return WriteGatewayTelemetry(dir, gt, osStatus)
 }
 

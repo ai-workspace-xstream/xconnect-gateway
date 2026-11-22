@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -167,5 +168,76 @@ func TestClientAckFailureReturnsError(t *testing.T) {
 	err = client.Ack(context.Background(), "token", cfg)
 	if err == nil {
 		t.Fatal("expected error on server 500 for Ack, got nil")
+	}
+}
+
+func TestClientConfigSendsV2AcceptHeaderAndDecodesV1AndV2(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	var acceptHeaders []string
+	respondV2 := true
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/overlay/v1/gateway/signed-config" {
+			http.NotFound(w, r)
+			return
+		}
+		acceptHeaders = append(acceptHeaders, r.Header.Get("Accept"))
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "private, no-store")
+		w.Header().Set("ETag", `"etag-1"`)
+		if !respondV2 {
+			_ = json.NewEncoder(w).Encode(Config{
+				SchemaVersion: 1, Role: Role, ConfigID: "cfg-v1", NetworkID: "net-1", GatewayID: "gw-1",
+				Generation: 1, IssuedAt: now, ExpiresAt: now.Add(time.Minute), InterfaceName: "xconzero0",
+				Address: "10.66.0.1/32", ListenPort: 51820, MTU: 1420,
+				Transport: Transport{ServerName: "gw.example.test", Port: 443, AuthID: "auth-1"},
+				Signature: Signature{Algorithm: "Ed25519", KeyID: "key-1", Value: "sig"},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(Config{
+			SchemaVersion: 2, Role: Role, ConfigID: "cfg-v2", NetworkID: "net-1", GatewayID: "gw-1",
+			Generation: 2, IssuedAt: now, ExpiresAt: now.Add(time.Minute), ConnectionMode: ConnectionModeWGVLESSL3,
+			InterfaceName: "xconzero0", Address: "10.66.0.1/32", ListenPort: 51820, MTU: 1420,
+			Transport: Transport{Kind: "vless-xhttp", ServerName: "gw.example.test", Port: 443, AuthID: "auth-1"},
+			Policy: &PolicyArtifact{
+				SchemaVersion:   1,
+				CompilerVersion: "xconnect-policy-v1",
+				NetworkID:       "net-1",
+				Revision:        2,
+				DefaultAction:   "deny",
+				ProtectedFlows:  []string{"control:controller-session"},
+				Rules:           []PolicyRule{{ID: "r1", Action: "allow", SourceDevices: []string{"*"}, DestinationDevices: []string{"*"}, Protocols: []string{"icmp"}}},
+			},
+			Signature: Signature{Algorithm: "Ed25519", KeyID: "key-1", Value: "sig"},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.http = server.Client()
+
+	v2Cfg, err := client.Config(context.Background(), "token")
+	if err != nil {
+		t.Fatalf("expected v2 config decode to succeed: %v", err)
+	}
+	if v2Cfg.SchemaVersion != 2 || v2Cfg.Policy == nil || len(v2Cfg.Policy.Rules) != 1 || v2Cfg.Policy.Rules[0].ID != "r1" {
+		t.Fatalf("unexpected decoded v2 config: %+v", v2Cfg)
+	}
+
+	respondV2 = false
+	v1Cfg, err := client.Config(context.Background(), "token")
+	if err != nil {
+		t.Fatalf("expected v1 fallback config decode to succeed: %v", err)
+	}
+	if v1Cfg.SchemaVersion != 1 || v1Cfg.Policy != nil {
+		t.Fatalf("unexpected decoded v1 config: %+v", v1Cfg)
+	}
+
+	if len(acceptHeaders) != 2 || !strings.Contains(acceptHeaders[0], SignedConfigV2MediaType) || !strings.Contains(acceptHeaders[0], "application/json") {
+		t.Fatalf("expected Accept header to negotiate %s, got %#v", SignedConfigV2MediaType, acceptHeaders)
 	}
 }

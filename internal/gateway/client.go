@@ -95,6 +95,10 @@ func NewClient(controller string) (*Client, error) {
 }
 
 func (c *Client) request(ctx context.Context, method, path, authorization string, input, output any) (http.Header, error) {
+	return c.requestWithAccept(ctx, method, path, authorization, "application/json", input, output)
+}
+
+func (c *Client) requestWithAccept(ctx context.Context, method, path, authorization, accept string, input, output any) (http.Header, error) {
 	endpoint := *c.base
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + path
 	var body io.Reader
@@ -109,7 +113,10 @@ func (c *Client) request(ctx context.Context, method, path, authorization string
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Accept", "application/json")
+	if strings.TrimSpace(accept) == "" {
+		accept = "application/json"
+	}
+	req.Header.Set("Accept", accept)
 	// The controller is fronted by an edge policy that rejects the default
 	// Go client signature before the request reaches the JSON API. Keep the
 	// client identifiable without putting credentials in the header.
@@ -165,7 +172,7 @@ func (c *Client) Session(ctx context.Context, credential, nonce string) (Session
 }
 func (c *Client) Config(ctx context.Context, token string) (Config, error) {
 	var out Config
-	head, err := c.request(ctx, http.MethodGet, "/api/overlay/v1/gateway/signed-config", "Bearer "+token, nil, &out)
+	head, err := c.requestWithAccept(ctx, http.MethodGet, "/api/overlay/v1/gateway/signed-config", "Bearer "+token, SignedConfigV2MediaType+", application/json", nil, &out)
 	if err != nil {
 		return out, err
 	}

@@ -13,7 +13,10 @@ import (
 	"time"
 )
 
-const Role = "gateway"
+const (
+	Role                    = "gateway"
+	SignedConfigV2MediaType = "application/vnd.xconnect.gateway-config.v2+json"
+)
 
 const (
 	FrontendDirectTLS    = "direct-tls"
@@ -63,6 +66,26 @@ type Transport struct {
 	ListenSocket string `json:"listen_socket,omitempty"`
 }
 
+type PolicyArtifact struct {
+	SchemaVersion   int          `json:"schema_version"`
+	CompilerVersion string       `json:"compiler_version"`
+	NetworkID       string       `json:"network_id"`
+	Revision        uint64       `json:"revision"`
+	DefaultAction   string       `json:"default_action"`
+	ProtectedFlows  []string     `json:"protected_flows"`
+	Rules           []PolicyRule `json:"rules"`
+}
+
+type PolicyRule struct {
+	WholeDevice        bool     `json:"whole_device,omitempty"`
+	ID                 string   `json:"id"`
+	Action             string   `json:"action"`
+	SourceDevices      []string `json:"source_devices"`
+	DestinationDevices []string `json:"destination_devices"`
+	Protocols          []string `json:"protocols"`
+	Ports              []int    `json:"ports"`
+}
+
 type Signature struct {
 	Algorithm string `json:"algorithm"`
 	KeyID     string `json:"key_id"`
@@ -70,23 +93,24 @@ type Signature struct {
 }
 
 type Config struct {
-	SchemaVersion  int         `json:"schema_version"`
-	Role           string      `json:"role"`
-	ConfigID       string      `json:"config_id"`
-	NetworkID      string      `json:"network_id"`
-	GatewayID      string      `json:"gateway_id"`
-	Generation     uint64      `json:"generation"`
-	IssuedAt       time.Time   `json:"issued_at"`
-	ExpiresAt      time.Time   `json:"expires_at"`
-	ConnectionMode string      `json:"connection_mode,omitempty"`
-	InterfaceName  string      `json:"interface_name"`
-	Address        string      `json:"address"`
-	ListenPort     int         `json:"listen_port"`
-	MTU            int         `json:"mtu"`
-	Peers          []Peer      `json:"peers"`
-	Transport      Transport   `json:"transport"`
-	Mesh           *relay.Spec `json:"mesh,omitempty"`
-	Signature      Signature   `json:"signature"`
+	SchemaVersion  int             `json:"schema_version"`
+	Role           string          `json:"role"`
+	ConfigID       string          `json:"config_id"`
+	NetworkID      string          `json:"network_id"`
+	GatewayID      string          `json:"gateway_id"`
+	Generation     uint64          `json:"generation"`
+	IssuedAt       time.Time       `json:"issued_at"`
+	ExpiresAt      time.Time       `json:"expires_at"`
+	ConnectionMode string          `json:"connection_mode,omitempty"`
+	InterfaceName  string          `json:"interface_name"`
+	Address        string          `json:"address"`
+	ListenPort     int             `json:"listen_port"`
+	MTU            int             `json:"mtu"`
+	Peers          []Peer          `json:"peers"`
+	Transport      Transport       `json:"transport"`
+	Mesh           *relay.Spec     `json:"mesh,omitempty"`
+	Policy         *PolicyArtifact `json:"policy,omitempty"`
+	Signature      Signature       `json:"signature"`
 }
 
 func (c Config) EffectiveConnectionMode() string {
@@ -96,25 +120,52 @@ func (c Config) EffectiveConnectionMode() string {
 	return ConnectionModeWGVLESSL3
 }
 
+// SigningBytes returns the canonical JSON payload covered by the controller's
+// Ed25519 signature for the config's schema version.
+func (c Config) SigningBytes() ([]byte, error) {
+	return c.signingBytes()
+}
+
 func (c Config) signingBytes() ([]byte, error) {
+	if c.SchemaVersion == 1 {
+		return json.Marshal(struct {
+			SchemaVersion  int         `json:"schema_version"`
+			Role           string      `json:"role"`
+			ConfigID       string      `json:"config_id"`
+			NetworkID      string      `json:"network_id"`
+			GatewayID      string      `json:"gateway_id"`
+			Generation     uint64      `json:"generation"`
+			IssuedAt       time.Time   `json:"issued_at"`
+			ExpiresAt      time.Time   `json:"expires_at"`
+			ConnectionMode string      `json:"connection_mode,omitempty"`
+			InterfaceName  string      `json:"interface_name"`
+			Address        string      `json:"address"`
+			ListenPort     int         `json:"listen_port"`
+			MTU            int         `json:"mtu"`
+			Peers          []Peer      `json:"peers"`
+			Transport      Transport   `json:"transport"`
+			Mesh           *relay.Spec `json:"mesh,omitempty"`
+		}{c.SchemaVersion, c.Role, c.ConfigID, c.NetworkID, c.GatewayID, c.Generation, c.IssuedAt, c.ExpiresAt, strings.TrimSpace(c.ConnectionMode), c.InterfaceName, c.Address, c.ListenPort, c.MTU, c.Peers, c.Transport, c.Mesh})
+	}
 	return json.Marshal(struct {
-		SchemaVersion  int         `json:"schema_version"`
-		Role           string      `json:"role"`
-		ConfigID       string      `json:"config_id"`
-		NetworkID      string      `json:"network_id"`
-		GatewayID      string      `json:"gateway_id"`
-		Generation     uint64      `json:"generation"`
-		IssuedAt       time.Time   `json:"issued_at"`
-		ExpiresAt      time.Time   `json:"expires_at"`
-		ConnectionMode string      `json:"connection_mode,omitempty"`
-		InterfaceName  string      `json:"interface_name"`
-		Address        string      `json:"address"`
-		ListenPort     int         `json:"listen_port"`
-		MTU            int         `json:"mtu"`
-		Peers          []Peer      `json:"peers"`
-		Transport      Transport   `json:"transport"`
-		Mesh           *relay.Spec `json:"mesh,omitempty"`
-	}{c.SchemaVersion, c.Role, c.ConfigID, c.NetworkID, c.GatewayID, c.Generation, c.IssuedAt, c.ExpiresAt, strings.TrimSpace(c.ConnectionMode), c.InterfaceName, c.Address, c.ListenPort, c.MTU, c.Peers, c.Transport, c.Mesh})
+		SchemaVersion  int             `json:"schema_version"`
+		Role           string          `json:"role"`
+		ConfigID       string          `json:"config_id"`
+		NetworkID      string          `json:"network_id"`
+		GatewayID      string          `json:"gateway_id"`
+		Generation     uint64          `json:"generation"`
+		IssuedAt       time.Time       `json:"issued_at"`
+		ExpiresAt      time.Time       `json:"expires_at"`
+		ConnectionMode string          `json:"connection_mode,omitempty"`
+		InterfaceName  string          `json:"interface_name"`
+		Address        string          `json:"address"`
+		ListenPort     int             `json:"listen_port"`
+		MTU            int             `json:"mtu"`
+		Peers          []Peer          `json:"peers"`
+		Transport      Transport       `json:"transport"`
+		Mesh           *relay.Spec     `json:"mesh,omitempty"`
+		Policy         *PolicyArtifact `json:"policy,omitempty"`
+	}{c.SchemaVersion, c.Role, c.ConfigID, c.NetworkID, c.GatewayID, c.Generation, c.IssuedAt, c.ExpiresAt, strings.TrimSpace(c.ConnectionMode), c.InterfaceName, c.Address, c.ListenPort, c.MTU, c.Peers, c.Transport, c.Mesh, c.Policy})
 }
 
 func (c Config) ValidateStructure(now time.Time) error {
@@ -147,8 +198,16 @@ func (c Config) ValidateStructure(now time.Time) error {
 		}
 	}
 
-	if c.SchemaVersion != 1 || c.Role != Role || c.ConfigID == "" || c.NetworkID == "" || c.GatewayID == "" || c.Generation == 0 || c.InterfaceName == "" || len(c.InterfaceName) > 15 || c.ListenPort < 1 || c.ListenPort > 65535 || c.MTU < 576 || (c.Transport.Kind != "" && c.Transport.Kind != "vless-xhttp") || c.Transport.Port != 443 || c.Transport.ServerName == "" || c.Transport.AuthID == "" || !c.ExpiresAt.After(now) || c.IssuedAt.After(now.Add(30*time.Second)) {
+	if (c.SchemaVersion != 1 && c.SchemaVersion != 2) || c.Role != Role || c.ConfigID == "" || c.NetworkID == "" || c.GatewayID == "" || c.Generation == 0 || c.InterfaceName == "" || len(c.InterfaceName) > 15 || c.ListenPort < 1 || c.ListenPort > 65535 || c.MTU < 576 || (c.Transport.Kind != "" && c.Transport.Kind != "vless-xhttp") || c.Transport.Port != 443 || c.Transport.ServerName == "" || c.Transport.AuthID == "" || !c.ExpiresAt.After(now) || c.IssuedAt.After(now.Add(30*time.Second)) {
 		return errors.New("invalid gateway signed config")
+	}
+	if c.SchemaVersion == 1 && c.Policy != nil {
+		return errors.New("gateway policy requires schema version 2")
+	}
+	if c.Policy != nil {
+		if err := validatePolicyArtifact(c.NetworkID, *c.Policy); err != nil {
+			return err
+		}
 	}
 	frontend := c.Transport.Frontend
 	if frontend == "" {
@@ -208,7 +267,7 @@ func (c Config) Verify(keys []SigningKey, now time.Time) error {
 		return err
 	}
 	var legacyPayload []byte
-	if strings.TrimSpace(c.ConnectionMode) != "" {
+	if c.SchemaVersion == 1 && strings.TrimSpace(c.ConnectionMode) != "" {
 		legacy := c
 		legacy.ConnectionMode = ""
 		legacyPayload, _ = legacy.signingBytes()
@@ -338,4 +397,83 @@ func (t Transport) XHTTPHost() string {
 		return t.ServerName
 	}
 	return t.Host
+}
+
+func validatePolicyArtifact(expectedNetworkID string, p PolicyArtifact) error {
+	if p.SchemaVersion != 1 {
+		return errors.New("invalid gateway policy schema version")
+	}
+	if strings.TrimSpace(p.NetworkID) == "" || p.NetworkID != expectedNetworkID {
+		return errors.New("gateway policy network mismatch")
+	}
+	if p.DefaultAction != "deny" && p.DefaultAction != "allow" {
+		return errors.New("invalid gateway policy default action")
+	}
+	if len(p.Rules) > 200 {
+		return errors.New("too many gateway policy rules")
+	}
+	seenIDs := make(map[string]struct{}, len(p.Rules))
+	for _, rule := range p.Rules {
+		if rule.ID == "" || len(rule.ID) > 64 || !validPolicyRuleID(rule.ID) {
+			return errors.New("invalid gateway policy rule id")
+		}
+		if _, dup := seenIDs[rule.ID]; dup {
+			return errors.New("duplicate gateway policy rule id")
+		}
+		seenIDs[rule.ID] = struct{}{}
+		if rule.Action != "allow" && rule.Action != "deny" {
+			return errors.New("invalid gateway policy rule action")
+		}
+		if len(rule.SourceDevices) == 0 || len(rule.DestinationDevices) == 0 {
+			return errors.New("gateway policy rule requires source and destination devices")
+		}
+		for _, dev := range rule.SourceDevices {
+			if !validPolicyDeviceRef(dev) {
+				return errors.New("invalid gateway policy source device")
+			}
+		}
+		for _, dev := range rule.DestinationDevices {
+			if !validPolicyDeviceRef(dev) {
+				return errors.New("invalid gateway policy destination device")
+			}
+		}
+		hasNonICMP := len(rule.Protocols) == 0
+		for _, rawProto := range rule.Protocols {
+			proto := strings.ToLower(strings.TrimSpace(rawProto))
+			if proto == "" || proto != rawProto {
+				return errors.New("invalid gateway policy rule protocol")
+			}
+			switch proto {
+			case "all", "tcp", "udp":
+				hasNonICMP = true
+			case "icmp":
+			default:
+				return errors.New("invalid gateway policy rule protocol")
+			}
+		}
+		if !hasNonICMP && len(rule.Ports) > 0 {
+			return errors.New("icmp policy rule cannot specify ports")
+		}
+		for _, port := range rule.Ports {
+			if port < 1 || port > 65535 {
+				return errors.New("invalid gateway policy rule port")
+			}
+		}
+	}
+	return nil
+}
+
+func validPolicyRuleID(id string) bool {
+	for i := 0; i < len(id); i++ {
+		ch := id[i]
+		if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == ':' || ch == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func validPolicyDeviceRef(dev string) bool {
+	trimmed := strings.TrimSpace(dev)
+	return trimmed != "" && trimmed == dev && !strings.ContainsAny(trimmed, " \t\r\n")
 }
