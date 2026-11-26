@@ -25,6 +25,7 @@ func TestCompileNilPolicyFailsClosedDeny(t *testing.T) {
 		"-F XCONNECT_ZERO_FWD",
 		"-A XCONNECT_ZERO_FWD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
 		"-A XCONNECT_ZERO_FWD -m conntrack --ctstate INVALID -j DROP",
+		`-A XCONNECT_ZERO_FWD -p icmp -m comment --comment "xcz:rev=0:default=icmp-allow" -j ACCEPT`,
 		`-A XCONNECT_ZERO_FWD -m comment --comment "xcz:rev=0:default=deny" -j DROP`,
 		"COMMIT",
 	}
@@ -32,6 +33,11 @@ func TestCompileNilPolicyFailsClosedDeny(t *testing.T) {
 		if !strings.Contains(ruleset.IPv4RestoreScript, want) {
 			t.Fatalf("missing %q in script:\n%s", want, ruleset.IPv4RestoreScript)
 		}
+	}
+	icmpIdx := strings.Index(ruleset.IPv4RestoreScript, `default=icmp-allow`)
+	denyIdx := strings.Index(ruleset.IPv4RestoreScript, `default=deny`)
+	if icmpIdx == -1 || denyIdx == -1 || icmpIdx >= denyIdx {
+		t.Fatalf("expected default=icmp-allow before default=deny in script:\n%s", ruleset.IPv4RestoreScript)
 	}
 	if ruleset.IPv6RestoreScript != "" {
 		t.Fatalf("expected empty IPv6 script for IPv4-only peers, got:\n%s", ruleset.IPv6RestoreScript)

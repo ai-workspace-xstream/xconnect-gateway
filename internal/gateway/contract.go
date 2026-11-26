@@ -365,7 +365,21 @@ func (c Config) Xray(certPath, keyPath string) ([]byte, error) {
 		},
 		"inbounds": []any{inbound},
 		"outbounds": []any{
-			map[string]any{"tag": "xconnect-wireguard", "protocol": "freedom", "settings": map[string]any{"redirect": "127.0.0.1:51820"}},
+			map[string]any{
+				"tag":      "xconnect-wireguard",
+				"protocol": "freedom",
+				"settings": map[string]any{
+					"redirect": "127.0.0.1:51820",
+					"finalRules": []any{
+						map[string]any{
+							"action":  "allow",
+							"ip":      []string{"127.0.0.1/32"},
+							"port":    "51820",
+							"network": "tcp,udp",
+						},
+					},
+				},
+			},
 			map[string]any{"tag": "block", "protocol": "blackhole"},
 		},
 	}
@@ -373,7 +387,21 @@ func (c Config) Xray(certPath, keyPath string) ([]byte, error) {
 		routing := profile["routing"].(map[string]any)
 		rules := routing["rules"].([]any)
 		routing["rules"] = append([]any{map[string]any{"type": "field", "inboundTag": []string{"xconnect-vless-in"}, "network": "tcp", "port": "51821", "outboundTag": "xconnect-peer-relay"}}, rules...)
-		profile["outbounds"] = append(profile["outbounds"].([]any), map[string]any{"tag": "xconnect-peer-relay", "protocol": "freedom", "settings": map[string]any{"redirect": "127.0.0.1:51821"}})
+		profile["outbounds"] = append(profile["outbounds"].([]any), map[string]any{
+			"tag":      "xconnect-peer-relay",
+			"protocol": "freedom",
+			"settings": map[string]any{
+				"redirect": "127.0.0.1:51821",
+				"finalRules": []any{
+					map[string]any{
+						"action":  "allow",
+						"ip":      []string{"127.0.0.1/32"},
+						"port":    "51821",
+						"network": "tcp,udp",
+					},
+				},
+			},
+		})
 	}
 	return json.MarshalIndent(profile, "", "  ")
 }
