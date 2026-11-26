@@ -44,7 +44,13 @@ func TestSignedGatewayConfigAndRendering(t *testing.T) {
 		Outbounds []struct {
 			Tag      string `json:"tag"`
 			Settings struct {
-				Redirect string `json:"redirect"`
+				Redirect   string `json:"redirect"`
+				FinalRules []struct {
+					Action  string   `json:"action"`
+					IP      []string `json:"ip"`
+					Port    string   `json:"port"`
+					Network string   `json:"network"`
+				} `json:"finalRules"`
 			} `json:"settings"`
 		} `json:"outbounds"`
 	}
@@ -58,6 +64,9 @@ func TestSignedGatewayConfigAndRendering(t *testing.T) {
 	for _, outbound := range profile.Outbounds {
 		if outbound.Tag == "xconnect-wireguard" && outbound.Settings.Redirect == "127.0.0.1:51820" {
 			foundRedirect = true
+			if len(outbound.Settings.FinalRules) != 1 || outbound.Settings.FinalRules[0].Action != "allow" || outbound.Settings.FinalRules[0].Port != "51820" || len(outbound.Settings.FinalRules[0].IP) != 1 || outbound.Settings.FinalRules[0].IP[0] != "127.0.0.1/32" {
+				t.Fatalf("Xray gateway outbound missing loopback WireGuard finalRules: %s", xray)
+			}
 		}
 	}
 	if !foundRedirect {

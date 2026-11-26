@@ -85,6 +85,9 @@ func Compile(iface string, peers []gateway.Peer, policy *gateway.PolicyArtifact)
 	tailTarget := "DROP"
 	if defaultAction == "allow" {
 		tailTarget = "ACCEPT"
+	} else {
+		icmpDefaultComment := quoteComment(fmt.Sprintf("xcz:rev=%d:default=icmp-allow", revision))
+		v4Rules = append(v4Rules, fmt.Sprintf("-A %s -p icmp -m comment --comment %s -j ACCEPT", ChainName, icmpDefaultComment))
 	}
 	tailComment := quoteComment(fmt.Sprintf("xcz:rev=%d:default=%s", revision, defaultAction))
 	v4Rules = append(v4Rules, fmt.Sprintf("-A %s -m comment --comment %s -j %s", ChainName, tailComment, tailTarget))
@@ -99,6 +102,10 @@ func Compile(iface string, peers []gateway.Peer, policy *gateway.PolicyArtifact)
 			fmt.Sprintf("-A %s -m conntrack --ctstate INVALID -j DROP", ChainName),
 		)
 		v6Rules = append(v6Rules, v6UserRules...)
+		if defaultAction == "deny" {
+			icmpDefaultComment := quoteComment(fmt.Sprintf("xcz:rev=%d:default=icmp-allow", revision))
+			v6Rules = append(v6Rules, fmt.Sprintf("-A %s -p ipv6-icmp -m comment --comment %s -j ACCEPT", ChainName, icmpDefaultComment))
+		}
 		v6Rules = append(v6Rules, fmt.Sprintf("-A %s -m comment --comment %s -j %s", ChainName, tailComment, tailTarget))
 		v6Script = formatRestoreScript(v6Rules)
 	}
