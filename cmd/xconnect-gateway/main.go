@@ -161,6 +161,7 @@ func syncConfig(ctx context.Context, args []string, apply bool) error {
 		return err
 	}
 	token := state.EnrollmentToken
+	refreshedSession := false
 	if token == "" || !state.EnrollmentExpiresAt.After(time.Now().Add(time.Minute)) {
 		session, sessionErr := client.Session(ctx, state.Credential.Credential, nonce())
 		if sessionErr != nil {
@@ -173,6 +174,7 @@ func syncConfig(ctx context.Context, args []string, apply bool) error {
 		state.EnrollmentToken = token
 		state.EnrollmentExpiresAt = session.ExpiresAt
 		state.SigningKeys = session.SigningKeys
+		refreshedSession = true
 	}
 	cfg, err := client.Config(ctx, token)
 	if err != nil {
@@ -182,7 +184,18 @@ func syncConfig(ctx context.Context, args []string, apply bool) error {
 		return errors.New("signed config binding mismatch")
 	}
 	if err := cfg.Verify(state.SigningKeys, time.Now().UTC()); err != nil {
-		return err
+		if !refreshedSession {
+			if session, sessionErr := client.Session(ctx, state.Credential.Credential, nonce()); sessionErr == nil && session.DeviceID == state.GatewayID && session.NetworkID == state.NetworkID && len(session.SigningKeys) > 0 {
+				token = session.EnrollmentToken
+				state.EnrollmentToken = token
+				state.EnrollmentExpiresAt = session.ExpiresAt
+				state.SigningKeys = session.SigningKeys
+				err = cfg.Verify(state.SigningKeys, time.Now().UTC())
+			}
+		}
+		if err != nil {
+			return err
+		}
 	}
 	if err := gateway.SaveSignedConfig(*dir, cfg); err != nil {
 		return err
